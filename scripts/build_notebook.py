@@ -23,9 +23,12 @@ Run the cells top to bottom. Every stage is resumable: checkpoints and outputs l
 
 **Before you start**
 1. Runtime → *Change runtime type* → GPU (T4 free tier works; A100/L4 = faster/better).
-2. Put the two competition archives in your Drive under `MyDrive/lit_data/`:
-   `…miami.tar.gz` (Bangor Miami) and `…enspa_dev.tar.gz` (35-min dev set). They are **never** uploaded anywhere else.
-3. Set `SMOKE = True` first (tiny model, ~5 min) to prove the whole chain works, then set it `False`.
+2. **Data is uploaded once**: the data cell asks you to pick the two archives (`…miami.tar.gz`, `…enspa_dev.tar.gz`) from your
+   computer and saves them to `MyDrive/lit_data/`; every later run reads them from Drive (prepared clips are cached there too).
+   They are never sent anywhere else.
+3. **Private repo**: create a GitHub token (Settings → Developer settings → Fine-grained tokens → this repo, *Contents: read*) and add it as
+   a Colab secret named `GITHUB_TOKEN` (key icon in the left bar, enable *Notebook access*).
+4. Set `SMOKE = True` first (tiny model, ~5 min) to prove the whole chain works, then set it `False`.
 """)
 
 code('''
@@ -33,7 +36,7 @@ code('''
 SMOKE      = True                     # True: tiny model + 3 conversations, proves the pipeline. False: real run
 PRESET     = "auto"                   # "t4" | "a100" | "auto" (pick by GPU)
 RUN_NAME   = "run1"                   # a new name = a fresh run; the same name = resume
-REPO_URL   = "https://github.com/YOUR_USER/lit-spanglish-asr.git"   # <- set after pushing the repo
+REPO_URL   = "https://github.com/raut7218/lit-spanglish-asr.git"   # private repo: add a Colab secret GITHUB_TOKEN (see below)
 DRIVE_DATA = "MyDrive/lit_data"       # folder in Drive holding the two .tar.gz files
 DRIVE_RUNS = "MyDrive/lit_runs"       # checkpoints / exports are written here
 LANGUAGE   = "es"                     # decoder language token ("es" or "en"); compare both on dev
@@ -101,11 +104,25 @@ sh(f"{PY} -m pytest -q -x tests", cwd=REPO, env=ENV)     # unit tests: scorer pa
 ''')
 
 code('''
-# ---- data: extract archives from Drive, build clips + manifests --------------------------------
+# ---- data: kept on YOUR DRIVE so you upload it only once -----------------------------------------
 RAW, PREP = WORK / "raw", WORK / "data_prepared"
 src = DRIVE / DRIVE_DATA
-miami_tar = next(iter(glob.glob(str(src / "*miami*.tar.gz"))), None)
-dev_tar   = next(iter(glob.glob(str(src / "*enspa_dev*.tar.gz"))), None)
+src.mkdir(parents=True, exist_ok=True)
+def find_tars():
+    return (next(iter(glob.glob(str(src / "*miami*.tar.gz"))), None),
+            next(iter(glob.glob(str(src / "*enspa_dev*.tar.gz"))), None))
+miami_tar, dev_tar = find_tars()
+if not (miami_tar and dev_tar):
+    print(f"Archives not on Drive yet ({src}). One-time upload: choose BOTH .tar.gz files from your computer "
+          "(miami + enspa_dev). They are saved to your Drive, so later runs skip this step.\n"
+          "(If the browser upload is slow/fails, drag the two files into Drive > lit_data/ in another tab instead, then re-run this cell.)")
+    if IN_COLAB and "google.colab" in sys.modules:
+        from google.colab import files
+        up = files.upload()                       # opens a file picker on your computer
+        for name in list(up):
+            shutil.move(name, src / name)
+        del up
+        miami_tar, dev_tar = find_tars()
 assert miami_tar and dev_tar, f"put *miami*.tar.gz and *enspa_dev*.tar.gz in {src}"
 cache = DRIVE / DRIVE_RUNS / f"prepared_{'smoke' if SMOKE else 'full'}.tar"
 
