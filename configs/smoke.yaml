@@ -1,0 +1,20 @@
+# Local CPU/GTX1650 smoke test: exercises every code path with a tiny model in a couple of minutes.
+model: openai/whisper-tiny
+language: es
+data_dir: /home/gaurav/work/prepared_smoke
+out_dir: /home/gaurav/work/runs/smoke
+dtype: fp32
+lora: {r: 8, alpha: 16, dropout: 0.0, targets: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]}
+lr: 5.0e-4
+warmup_steps: 2
+batch_size: 2
+grad_accum: 2
+max_steps: 6
+eval_steps: 3
+save_steps: 3
+keep_best: 2
+eval_max_clips: 8
+holdout_eval_clips: 4
+eval_batch_size: 4
+num_workers: 2
+gradient_checkpointing: true

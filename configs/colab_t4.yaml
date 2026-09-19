@@ -1,0 +1,19 @@
+# Colab free T4 (16 GB, fp16 only). Whisper large-v3-turbo: same 32-layer encoder as large-v3 but a
+# 4-layer decoder -> ~2x faster decoding at inference, similar accuracy after fine-tuning.
+model: openai/whisper-large-v3-turbo
+language: es
+data_dir: /content/data_prepared
+out_dir: /content/drive/MyDrive/lit_runs/turbo_t4
+dtype: fp16
+lora: {r: 32, alpha: 64, dropout: 0.05, targets: [q_proj, k_proj, v_proj, out_proj, fc1, fc2]}
+lr: 1.0e-4
+warmup_steps: 100
+batch_size: 4
+grad_accum: 8            # effective batch 32 clips
+epochs: 3
+eval_steps: 100
+save_steps: 50           # cheap (adapter only) -> a dropped session loses <= 50 steps
+keep_best: 3
+eval_batch_size: 8
+num_workers: 2
+max_train_minutes: 0     # set e.g. 200 to stop cleanly before a Colab session limit; re-run to resume
