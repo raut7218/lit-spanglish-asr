@@ -114,7 +114,7 @@ def find_tars():
 miami_tar, dev_tar = find_tars()
 if not (miami_tar and dev_tar):
     print(f"Archives not on Drive yet ({src}). One-time upload: choose BOTH .tar.gz files from your computer "
-          "(miami + enspa_dev). They are saved to your Drive, so later runs skip this step.\n"
+          "(miami + enspa_dev). They are saved to your Drive, so later runs skip this step.\\n"
           "(If the browser upload is slow/fails, drag the two files into Drive > lit_data/ in another tab instead, then re-run this cell.)")
     if IN_COLAB and "google.colab" in sys.modules:
         from google.colab import files
