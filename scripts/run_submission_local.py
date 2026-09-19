@@ -63,6 +63,7 @@ def main():
     score = wer([r["ref"] for r in rows], [hyp[r["orig"]] for r in rows])
     empty = sum(1 for o in out if not o["transcript"].strip())
     print(f"[run_submission_local] rows={len(out)} empty={empty} time={el:.0f}s ({el/len(rows):.2f}s/clip) dev WER={score:.4f}")
+    assert empty <= 0.5 * len(out), f"{empty}/{len(out)} empty transcripts: inference is broken"
     for r in rows[:3]:
         print("  REF:", r["ref"][:120], "\n  HYP:", hyp[r["orig"]][:120])
     shutil.rmtree(work, ignore_errors=True)

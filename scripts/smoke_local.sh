@@ -13,6 +13,6 @@ echo "=== 2/7 unit tests";                     $PY -m pytest -q tests
 echo "=== 3/7 train (tiny)";                   $PY -m lit.train $CFG
 echo "=== 4/7 evaluate adapter";               $PY -m lit.evaluate --model openai/whisper-tiny --adapter "$WORK/run/final_adapter" --data_dir "$WORK/prepared" --max_clips 12 --dtype fp32
 echo "=== 5/7 export + CTranslate2";           $PY -m lit.export --model openai/whisper-tiny --adapter "$WORK/run/final_adapter" --data_dir "$WORK/prepared" --out "$WORK/export" --quantization float32
-echo "=== 6/7 build submission.zip";           $PY scripts/make_submission.py --export "$WORK/export" --out "$WORK/submission.zip" --cfg '{"beam_size": 2, "language": "es"}'
+echo "=== 6/7 build submission.zip";           $PY scripts/make_submission.py --export "$WORK/export" --out "$WORK/submission.zip" --cfg '{"beam_size": 2, "language": "es", "compute_type": "float32"}'
 echo "=== 7/7 run zip like the platform";      $PY scripts/run_submission_local.py --zip "$WORK/submission.zip" --prepared "$WORK/prepared" --dev_raw "$DEV" --n 12
 echo "SMOKE TEST PASSED"

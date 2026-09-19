@@ -45,4 +45,6 @@ def test_idempotent():
 
 
 def test_sentence_initial_lowercased_but_midsentence_case_kept():
-    assert norm("Okay? I will see Target") == "okay I will see Target"
+    # the scorer even lowercases a sentence-initial "I" -> "i"; mid-sentence "I" and names stay
+    assert norm("Okay? I will see Target") == "okay i will see Target"
+    assert norm("so I will see Target") == "so I will see Target"

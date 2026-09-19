@@ -32,6 +32,7 @@ from .features import LogMel, pad_batch, spec_augment
 from .model_utils import (encode_targets, load_base, load_clip_arrays, load_tokenizer, pick_dtype, read_manifest,
                           transcribe_hf)
 from .normalize import wer
+from .postprocess import postprocess
 
 DEFAULTS = dict(
     model="openai/whisper-large-v3-turbo",
@@ -108,7 +109,7 @@ def evaluate(model, tok, fe, rows, root, cfg, device, amp_dtype, n_max=0):
     hyps = transcribe_hf(model, tok, fe, audios, device, cfg["language"], cfg["eval_batch_size"], cfg["eval_beams"],
                          amp_dtype=amp_dtype)
     refs = [r.get("ref", r["text"]) for r in rows]
-    return wer(refs, hyps), hyps
+    return wer(refs, [postprocess(h) for h in hyps]), hyps  # score what we would ship (loops collapsed)
 
 
 def adapter_state(model):

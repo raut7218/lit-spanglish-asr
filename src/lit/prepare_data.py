@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import random
+import re
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -90,14 +91,14 @@ def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15):
                 i = j + 1
                 continue
             group = run[i : j + 1]
-            text = norm(" ".join(u.text for u in group))
+            text = " ".join(u.text for u in group).strip()  # styled: sentence punctuation kept
             others = [
                 (x.start_ms, x.end_ms)
                 for x in utts
                 if x.speaker != group[0].speaker and x.end_ms > start_ms and x.start_ms < end_ms
             ]
             overlap = _covered(others, start_ms, end_ms) / max(dur, 1e-6)
-            n_words = len(text.split())
+            n_words = len(norm(text).split())
             wps = n_words / dur
             n_spa, n_eng = sum(u.n_spa for u in group), sum(u.n_eng for u in group)
             ok = dur >= MIN_CLIP_S and n_words >= 1 and overlap <= max_overlap and 0.3 <= wps <= 6.5
@@ -128,7 +129,7 @@ def _process_conv(args):
             continue
         rel = f"clips/{conv}_{k:05d}.flac"
         sf.write(Path(out_dir) / rel, audio[a:b], SR, subtype="PCM_16")
-        rows.append(dict(id=f"{conv}_{k:05d}", audio=rel, conv=conv, **{k2: v for k2, v in c.items() if k2 not in ("start", "end")},
+        rows.append(dict(id=f"{conv}_{k:05d}", audio=rel, conv=conv, **{k2: v for k2, v in c.items() if k2 not in ("start", "end", "duration")},
                          t0=c["start"], duration=round((b - a) / SR, 3)))
     return conv, rows
 
@@ -185,7 +186,7 @@ def prepare_dev(dev_dir: Path, out_dir: Path):
         audio = load_audio(dev_dir / "clips" / name, SR)
         rel = f"dev_clips/{Path(name).stem}.flac"
         sf.write(out_dir / rel, audio, SR, subtype="PCM_16")
-        rows.append(dict(id=Path(name).stem, audio=rel, orig=name, ref=r["transcript"], text=norm(r["transcript"]),
+        rows.append(dict(id=Path(name).stem, audio=rel, orig=name, ref=r["transcript"], text=re.sub(r"\s+", " ", re.sub(r"\[[^\]]*\]", " ", r["transcript"])).strip(),
                          duration=round(len(audio) / SR, 3), speaker=r.get("speaker"), conv="dev"))
     write_jsonl(out_dir / "dev.jsonl", rows)
     return rows

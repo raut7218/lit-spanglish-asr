@@ -8,6 +8,7 @@ from pathlib import Path
 
 TIME_RE = re.compile(r"\x15(\d+)_(\d+)\x15")
 LANG_TAG_RE = re.compile(r"@s:([a-z&+]+)")
+FILLERS = {"um", "uh", "eh", "ah", "mm", "hmm"}
 
 
 @dataclass
@@ -40,6 +41,19 @@ def read_participants(path: Path) -> dict[str, str]:
     return {}
 
 
+def style_text(s: str) -> str:
+    """Tidy CHAT tokens into the transcript style of the dev/test set: terminators attached to the
+    previous word ("well ." -> "well."), sentence-initial letters capitalised. Keeping sentence
+    punctuation matters because the scorer lowercases sentence-initial letters (even "I" -> "i"):
+    the model must place sentence boundaries like the references do for those tokens to match.
+    """
+    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+([.?!])", r"\1", s)
+    s = re.sub(r"\.{4,}", "...", s)
+    s = re.sub(r"(?:^|(?<=[?!])\s+|(?<=[^.]\.)\s+)([^\W\d_])", lambda m: m.group(0)[:-1] + m.group(1).upper(), s)
+    return s if s.strip(" .?!") else ""
+
+
 def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
     """CHAT main-tier text -> plain verbatim words.
 
@@ -54,7 +68,10 @@ def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
 
     s = re.sub(r"\[[^\]]*\]", " ", s)  # [/] [//] [?] [=! laughs] [* ...]
     s = re.sub(r"&=\S+", " ", s)  # events: &=laughs
-    s = re.sub(r"&[-+~]?\S+", " ", s)  # fragments / fillers: &e &nes &-uh
+    # phonological fragments (&e, &nes) -> "e...", "nes..." : the organisers' transcripts write cut-off
+    # words that way (e.g. "chul...", "tha..."), and the scorer keeps "..." attached to the token.
+    s = re.sub(r"(?<![\w@])&(?![=\-+~])([A-Za-z]+):?", lambda m: m.group(1) if m.group(1).lower() in FILLERS else m.group(1) + "...", s)
+    s = re.sub(r"&[-+~]\S+", " ", s)  # remaining markup
     s = re.sub(r"\(\.+\)", " ", s)  # pauses (.) (..)
     s = re.sub(r"\+[<\"/,.^+]*[.?!]*", " ", s)  # linkers / terminators: +< +" +... +//.
     s = s.replace("<", " ").replace(">", " ")
@@ -75,7 +92,7 @@ def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
         toks.append(tok)
     s = " ".join(toks)
     s = re.sub(r"[+^~≈↑↓⌈⌉⌊⌋‹›]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
+    s = style_text(s)
     return s, unintelligible, n_spa, n_eng
 
 

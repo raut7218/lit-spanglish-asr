@@ -16,13 +16,13 @@ CHA = """@UTF8
 
 def test_clean_basic():
     t, unint, spa, eng = clean_chat_text("<now that I> [/] now that I remember antes@s:spa de@s:spa .")
-    assert t == "now that I now that I remember antes de ."
-    assert not unint and spa == 2 and eng == 6
+    assert t == "Now that I now that I remember antes de."
+    assert not unint and spa == 2 and eng == 7
 
 
 def test_clean_markup():
     t, unint, *_ = clean_chat_text("[- spa] este thi(nk) o_k@s:eng&spa xxx New_York &=laughs (.) +... &e")
-    assert t == "este think okay New York"
+    assert t == "Este think okay New York e..."
     assert unint
 
 
@@ -32,4 +32,10 @@ def test_parse(tmp_path):
     u = parse_cha(p)
     assert len(u) == 3  # the utterance without a time mark is dropped
     assert (u[0].speaker, u[0].start_ms, u[0].end_ms) == ("PAI", 6, 2949)
-    assert u[2].text == "este think okay more words" and u[2].has_unintelligible
+    assert u[2].text == "Este think okay more words" and u[2].has_unintelligible
+
+
+def test_styled_targets_and_fragments():
+    t, *_ = clean_chat_text("I think &e +... es@s:spa &nes que &um it's &=laughs fine ? yeah . ")
+    assert t == "I think e... es nes... que um it's fine? Yeah."
+    assert clean_chat_text("xxx .")[0] == ""

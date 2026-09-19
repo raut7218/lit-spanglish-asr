@@ -4,7 +4,11 @@ this module is copied into submission.zip and must run in the offline competitio
 
 from __future__ import annotations
 
+import ctypes
+import glob
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
@@ -33,6 +37,25 @@ DEFAULT_CFG = dict(
 )
 
 
+def preload_cuda12_libs():
+    """ctranslate2 4.x needs CUDA-12 cuBLAS/cuDNN. In the competition image they arrive as pip wheels
+    (nvidia-cublas-cu12, nvidia-cudnn-cu12 via tensorflow[and-cuda]) that are NOT on the loader path,
+    so dlopen them by absolute path (RTLD_GLOBAL) before ctranslate2 first touches the GPU."""
+    loaded = []
+    roots = [p for p in sys.path if p.endswith("site-packages") or p.endswith("dist-packages")]
+    for root in roots:
+        for pat in ("nvidia/cuda_runtime/lib/libcudart.so.12", "nvidia/cublas/lib/libcublasLt.so.12",
+                    "nvidia/cublas/lib/libcublas.so.12", "nvidia/cudnn/lib/libcudnn.so.9",
+                    "nvidia/cuda_nvrtc/lib/libnvrtc.so.12"):
+            for f in glob.glob(os.path.join(root, pat)):
+                try:
+                    ctypes.CDLL(f, mode=ctypes.RTLD_GLOBAL)
+                    loaded.append(os.path.basename(f))
+                except OSError:
+                    pass
+    return loaded
+
+
 def load_cfg(model_dir) -> dict:
     cfg = dict(DEFAULT_CFG)
     p = Path(model_dir) / "infer_config.json"
@@ -41,8 +64,14 @@ def load_cfg(model_dir) -> dict:
     return cfg
 
 
+def _probe_audio():
+    t = np.arange(SR) / SR
+    return (0.05 * np.sin(2 * np.pi * 200 * t) + 0.01 * np.random.default_rng(0).standard_normal(SR)).astype(np.float32)
+
+
 class Transcriber:
     def __init__(self, ct2_dir, cfg: dict | None = None, lexicon: dict | None = None, device: str = "auto"):
+        print(f"[infer] preloaded CUDA libs: {preload_cuda12_libs()}", flush=True)
         from faster_whisper import BatchedInferencePipeline, WhisperModel
 
         self.cfg = {**DEFAULT_CFG, **(cfg or {})}
@@ -54,10 +83,26 @@ class Transcriber:
                 device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
             except Exception:
                 device = "cpu"
-        compute = self.cfg["compute_type"] if device == "cuda" else "int8"
-        self.model = WhisperModel(str(ct2_dir), device=device, compute_type=compute, local_files_only=True)
-        self.pipe = BatchedInferencePipeline(self.model)
         self.beam = self.cfg["beam_size"]
+        self.ct2_dir = ct2_dir
+        self.device = device
+        try:
+            self._build(device)
+            self.transcribe_array(_probe_audio())  # a real GPU decode: surfaces missing/incompatible CUDA libs now
+        except Exception as e:
+            if device == "cpu":
+                raise
+            print(f"[infer] !!! GPU path failed ({e!r}); FALLING BACK TO CPU int8 (slow but correct)", flush=True)
+            self._build("cpu")
+            self.transcribe_array(_probe_audio())
+        print(f"[infer] ready on {self.device}", flush=True)
+
+    def _build(self, device):
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
+
+        compute = self.cfg["compute_type"] if device == "cuda" else "int8"
+        self.model = WhisperModel(str(self.ct2_dir), device=device, compute_type=compute, local_files_only=True)
+        self.pipe = BatchedInferencePipeline(self.model)
         self.device = device
 
     def _common(self, dur_s):
@@ -97,19 +142,19 @@ class Transcriber:
                                                 without_timestamps=False, condition_on_previous_text=False)
                 text = " ".join(s.text.strip() for s in segs)
             except Exception as e2:
-                print(f"[infer] sequential decode failed too: {e2!r}", flush=True)
-                text = ""
+                raise RuntimeError(f"both decoders failed for {path}: {e2!r}") from e2
         return postprocess(text, self.lex)
 
 
 def transcribe_many(t: Transcriber, paths, log_every=25):
-    out, t0 = [], time.time()
+    out, t0, failed = [], time.time(), 0
     budget = t.cfg["time_budget_s"]
     n = len(paths)
     for i, p in enumerate(paths):
         try:
             out.append(t.transcribe_file(p))
-        except Exception as e:
+        except Exception as e:  # one bad clip must not kill the run: emit "" for it, but count it
+            failed += 1
             print(f"[infer] FAILED {p}: {e!r}", flush=True)
             out.append("")
         el = time.time() - t0
@@ -117,5 +162,7 @@ def transcribe_many(t: Transcriber, paths, log_every=25):
             print(f"[infer] projected {el/(i+1)*n:.0f}s > budget {budget}s: switching to greedy", flush=True)
             t.beam = 1
         if (i + 1) % log_every == 0 or i + 1 == n:
-            print(f"[infer] {i+1}/{n} clips, {el:.0f}s elapsed", flush=True)
+            print(f"[infer] {i+1}/{n} clips, {el:.0f}s elapsed, {failed} failed", flush=True)
+    if failed > max(2, 0.05 * n):  # systemic problem: a mostly-empty CSV would only score ~1.0 WER, so fail loudly
+        raise RuntimeError(f"{failed}/{n} clips failed to transcribe")
     return out
