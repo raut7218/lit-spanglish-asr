@@ -93,7 +93,6 @@ if not (PREP / "train.jsonl").exists():
     else:
         RAW.mkdir(exist_ok=True)
         if not (RAW / "miami").exists(): sh(f"tar xzf {miami_tar} -C {RAW}")
-        sh(f"{PY} -m lit.prepare_data --miami_dir {RAW/'miami'} --dev_dir {RAW/'enspa_dev'} --out_dir {PREP} --workers 8", cwd=REPO, env=ENV) if (RAW / "enspa_dev").exists() else None
 if not (RAW / "enspa_dev").exists(): sh(f"tar xzf {dev_tar} -C {RAW}")
 if not (PREP / "train.jsonl").exists():
     sh(f"{PY} -m lit.prepare_data --miami_dir {RAW/'miami'} --dev_dir {RAW/'enspa_dev'} --out_dir {PREP} --workers 8", cwd=REPO, env=ENV)
