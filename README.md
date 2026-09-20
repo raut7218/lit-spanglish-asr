@@ -41,3 +41,21 @@ scripts/smoke_local.sh /path/to/miami /path/to/enspa_dev
 
 ## Rules respected
 Only organiser-provided data for training; no competition audio/text is sent to any hosted API; data and weights are git-ignored.
+
+## Results so far (dev = the 35-min official set, never trained on; scorer-exact WER)
+
+| System | Dev WER |
+|---|---|
+| Whisper large-v3 zero-shot, `es` token / `en` token, greedy | 0.509 / 0.430 |
+| + LoRA fine-tune on Bangor Miami (500 steps, greedy) | 0.1051 |
+| + convention rules (`gonna`->`going to`, capital `I`, `ah`->`uh`, drop `um`), greedy | 0.0919 |
+| **Shipped zip: CTranslate2 fp16, beam 5, rules, no casing lexicon (155 clips, 0.52 s/clip on A100)** | **0.0875** |
+
+Caveats: dev is only 155 clips (~+-0.01); the 4 rules and the checkpoint were chosen while looking at dev. Speaker-disjoint Miami hold-out WER was 0.128-0.143 (different transcription conventions).
+Error analysis (`python -m lit.analyze`) showed the remaining gap is mostly convention mismatch: Miami writes "gonna" (820x) / "ah" (603x), dev writes "going to" / never "ah".
+
+## Speed notes (A100 40 GB)
+Training loop: gradient checkpointing off with automatic OOM fallback, 10 dataloader workers, TF32, fused AdamW -> 3.6 s/step (was 6.2 s). GPU utilisation is ~45-70%: the remaining bottleneck is Python/launch overhead in the LoRA-wrapped model, not data.
+
+## Next ideas
+Fix conventions in the training targets (gonna->going to, ah) and retrain; finish the cosine schedule (steps 500-1107); language token `en` check on the fine-tuned model; final retrain including dev only after model selection.
