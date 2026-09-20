@@ -174,3 +174,27 @@ class Augmenter:
         if peak > 1.0:
             x = x / peak
         return x.astype(np.float32)
+
+
+def _ff(args, data):
+    return subprocess.run(["ffmpeg", "-nostdin", "-v", "error", *args], input=data, capture_output=True, check=True, timeout=60).stdout
+
+
+def codec_chain(x: np.ndarray, rng) -> np.ndarray:
+    """WhatsApp-voice-note chain used by the test set: Opus (voip, 12-24 kbps) -> MP3 64 kbps @ 48 kHz -> 16 kHz.
+    Any ffmpeg failure returns the input unchanged."""
+    br = rng.choice(["12k", "16k", "24k", "none"])
+    try:
+        cur = x.astype(np.float32).tobytes()
+        fmt_in = ["-f", "f32le", "-ar", "16000", "-ac", "1", "-i", "-"]
+        if br != "none":
+            cur = _ff(fmt_in + ["-c:a", "libopus", "-b:a", br, "-application", "voip", "-f", "ogg", "-"], cur)
+            cur = _ff(["-i", "-", "-ar", "48000", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "-"], cur)
+        else:
+            cur = _ff(fmt_in + ["-ar", "48000", "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "-"], cur)
+        y = np.frombuffer(_ff(["-i", "-", "-ar", "16000", "-ac", "1", "-f", "f32le", "-"], cur), np.float32)
+        if len(y) < 100:
+            return x
+        return y[: len(x)] if len(y) >= len(x) else np.pad(y, (0, len(x) - len(y)))
+    except Exception:
+        return x

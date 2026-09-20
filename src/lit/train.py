@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import WhisperFeatureExtractor
 
 from .audio import load_audio
+from .augment import codec_chain
 from .features import LogMel, pad_batch, spec_augment
 from .gpu_aug import GpuAugConfig, GpuAugmenter, normalize_level_db
 from .model_utils import (encode_targets, load_base, load_clip_arrays, load_tokenizer, pick_dtype, read_manifest,
@@ -57,7 +58,7 @@ DEFAULTS = dict(
     ema_decay=0.999,
     max_train_minutes=0, num_workers="auto",
     gradient_checkpointing="auto",  # True | False | "auto" (off, switch on if the GPU runs out of memory)
-    cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_variant=0.9),  # speed perturbation + codec-bank variant pick
+    cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_variant=0.9, p_codec=0.3),  # speed, codec-bank pick, online Opus->MP3 chain (no bank)
     gpu_aug=dict(), spec_augment=True, seed=13, max_clip_seconds=29.5,
 )
 
@@ -108,6 +109,8 @@ class ClipDataset(Dataset):
                 n = int(round(len(audio) / f))
                 audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
         audio = audio[: int(self.cfg["max_clip_seconds"] * 16000)]
+        if self.train and not r.get("variants") and rng.random() < ca.get("p_codec", 0.0) and not r.get("nonspeech"):
+            audio = codec_chain(audio, rng)  # test clips are MP3-64k re-encodes of Opus voice notes
         dec_in, labels = encode_targets(self.tok, r["text"])
         return audio, dec_in, labels, bool(r.get("nonspeech"))
 

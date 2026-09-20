@@ -32,7 +32,7 @@ DRIVE_RUNS  = "MyDrive/lit_runs"
 CONFIG      = "configs/colab_a100_v2.yaml"
 EXTRA_SET   = ""             # e.g. "max_steps=1500 lora.r=32 dev_in_train=spk1"
 DEV_IN_TRAIN = "none"        # none | spk1 | spk2 | all   (all = final fit; dev WER is then contaminated)
-BUILD_BANK  = True           # pre-render Opus->MP3 codec variants (~15 min once, cached on Drive)
+BUILD_BANK  = False          # optional offline codec bank: SLOW (~1.5-2 h on Colab). Training already applies an online Opus->MP3 chain (p_codec=0.3)
 RUN_E2E_TEST = True          # tiny end-to-end training test on the GPU
 BASELINE_ADAPTER = "run1/final_adapter"   # old model, scored on the NEW validation sets for a fair comparison
 DOWNLOAD_ZIP = False
