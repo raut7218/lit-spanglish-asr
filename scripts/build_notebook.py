@@ -172,7 +172,8 @@ code('''
 # ---- evaluate the final adapter (dev = honest, Miami hold-out = speaker-disjoint) ---------------
 assert (RUN / "final_adapter").exists(), "training has not finished"
 for split in ("dev", "miami_holdout"):
-    sh(f"{PY} -m lit.evaluate --model {BASE} --adapter {RUN/'final_adapter'} --data_dir {PREP} --split {split} --language {LANGUAGE} --beams {1 if SMOKE else 4} --max_clips {12 if SMOKE else 0}", cwd=REPO, env=ENV)
+    sh(f"{PY} -m lit.evaluate --model {BASE} --adapter {RUN/'final_adapter'} --data_dir {PREP} --split {split} --language {LANGUAGE} --beams {1 if SMOKE else 4} --max_clips {12 if SMOKE else 0} --dump {RUN}/{split}_preds.csv", cwd=REPO, env=ENV)
+    sh(f"{PY} -m lit.analyze {RUN}/{split}_preds.csv --top 20 --worst 6", cwd=REPO, env=ENV)   # where do the remaining errors come from?
 ''')
 
 code('''
