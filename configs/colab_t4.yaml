@@ -12,8 +12,9 @@ batch_size: 4
 grad_accum: 8            # effective batch 32 clips
 epochs: 3
 eval_steps: 100
-save_steps: 50           # cheap (adapter only) -> a dropped session loses <= 50 steps
+save_steps: 100
 keep_best: 3
 eval_batch_size: 8
-num_workers: 2
+num_workers: auto
+gradient_checkpointing: true   # 16 GB: keep activations small
 max_train_minutes: 0     # set e.g. 200 to stop cleanly before a Colab session limit; re-run to resume

@@ -11,7 +11,8 @@ batch_size: 8
 grad_accum: 4
 epochs: 3
 eval_steps: 100
-save_steps: 50
+save_steps: 100
 keep_best: 3
-eval_batch_size: 16
-num_workers: 4
+eval_batch_size: 32
+num_workers: auto        # min(10, vCPUs-2): augmentation is CPU heavy
+gradient_checkpointing: auto   # off (fast); flips on automatically if the GPU runs out of memory

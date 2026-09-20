@@ -44,8 +44,8 @@ DEFAULTS = dict(
     lr=1e-4, min_lr=1e-6, warmup_steps=100, weight_decay=1e-3, grad_clip=1.0, label_smoothing=0.1,
     batch_size=4, grad_accum=8, epochs=4, max_steps=0,
     eval_steps=200, save_steps=200, keep_best=3, eval_batch_size=8, eval_beams=1,
-    eval_max_clips=0, holdout_eval_clips=60, max_train_minutes=0, num_workers=2,
-    gradient_checkpointing=True,
+    eval_max_clips=0, holdout_eval_clips=60, max_train_minutes=0, num_workers="auto",
+    gradient_checkpointing="auto",  # True | False | "auto" (off, switch on if the GPU runs out of memory)
     spec_augment=True, augment=dict(), include_dev_in_train=False, seed=13,
     max_clip_seconds=29.5,
 )
@@ -143,6 +143,10 @@ def main(argv=None):
     (out / "config.json").write_text(json.dumps(cfg, indent=2))
 
     random.seed(cfg["seed"]); np.random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
+    torch.backends.cuda.matmul.allow_tf32 = True  # fp32 LoRA matmuls on Ampere+
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = pick_dtype(cfg["dtype"]) if device.type == "cuda" else torch.float32
     use_scaler = device.type == "cuda" and dtype == torch.float16
@@ -155,8 +159,15 @@ def main(argv=None):
     lcfg = LoraConfig(r=cfg["lora"]["r"], lora_alpha=cfg["lora"]["alpha"], lora_dropout=cfg["lora"]["dropout"],
                       target_modules=cfg["lora"]["targets"], bias="none")
     model = get_peft_model(model, lcfg)
-    if cfg["gradient_checkpointing"]:
+    gc_on = {"v": False}
+
+    def enable_gc():
         model.base_model.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        gc_on["v"] = True
+        print("[train] gradient checkpointing ON", flush=True)
+
+    if cfg["gradient_checkpointing"] is True:
+        enable_gc()
     model.print_trainable_parameters()
     mel = LogMel(fe, device)
 
@@ -177,6 +188,9 @@ def main(argv=None):
         for r in random.Random(2).sample(train_rows, min(40, len(train_rows))):
             pool.append(load_audio(root / r["audio"])[: 16000 * 12])
     aug = Augmenter(AugConfig(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg["augment"].items()}), pool)
+    if cfg["num_workers"] == "auto":  # augmentation (ffmpeg codecs, FFTs) is CPU heavy: keep the GPU fed
+        cfg["num_workers"] = max(2, min(10, (os.cpu_count() or 4) - 2))
+    print(f"[train] dataloader workers={cfg['num_workers']}")
     ds = ClipDataset(train_rows, root, tok, aug, cfg, train=True)
     pad_id = tok.eos_token_id
     steps_per_epoch = max(1, len(ds) // (cfg["batch_size"] * cfg["grad_accum"]))
@@ -184,7 +198,8 @@ def main(argv=None):
     print(f"[train] steps/epoch={steps_per_epoch} total_steps={total_steps}")
 
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"], betas=(0.9, 0.98))
+    opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"], betas=(0.9, 0.98),
+                            fused=device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # ---- resume
@@ -213,19 +228,32 @@ def main(argv=None):
         idxs = order[skip:]
         sub = torch.utils.data.Subset(ds, idxs)
         dl = DataLoader(sub, batch_size=bs, shuffle=False, num_workers=cfg["num_workers"], drop_last=True,
-                        collate_fn=partial(collate, pad_id=pad_id), persistent_workers=False, prefetch_factor=4 if cfg["num_workers"] else None)
+                        collate_fn=partial(collate, pad_id=pad_id), persistent_workers=False, pin_memory=device.type == "cuda",
+                        prefetch_factor=6 if cfg["num_workers"] else None)
         acc_loss, acc_n = 0.0, 0
         for wav, dec_in, labels, lens in dl:
             feats = mel(wav)
             if cfg["spec_augment"]:
                 feats = spec_augment(feats, lens)
             feats = feats.to(dtype)
-            dec_in, labels = dec_in.to(device), labels.to(device)
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                logits = model(input_features=feats, decoder_input_ids=dec_in).logits
-            loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100,
-                                   label_smoothing=cfg["label_smoothing"])
-            scaler.scale(loss / cfg["grad_accum"]).backward()
+            dec_in, labels = dec_in.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            for attempt in range(2):
+                try:
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                        logits = model(input_features=feats, decoder_input_ids=dec_in).logits
+                    loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100,
+                                           label_smoothing=cfg["label_smoothing"])
+                    scaler.scale(loss / cfg["grad_accum"]).backward()
+                    break
+                except torch.cuda.OutOfMemoryError:
+                    if gc_on["v"] or attempt == 1:
+                        raise
+                    logits = loss = None  # free the graph, then retry this same batch with checkpointing
+                    opt.zero_grad(set_to_none=True)  # drop the partial accumulation window; restart it with this batch
+                    micro -= micro % cfg["grad_accum"]
+                    torch.cuda.empty_cache()
+                    print("[train] OOM without checkpointing -> enabling gradient checkpointing and retrying", flush=True)
+                    enable_gc()
             acc_loss += loss.item(); acc_n += 1; micro += 1; batches_done += 1
             if micro % cfg["grad_accum"] != 0:
                 continue
