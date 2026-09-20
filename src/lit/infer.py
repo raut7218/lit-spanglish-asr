@@ -65,6 +65,15 @@ def load_cfg(model_dir) -> dict:
     return cfg
 
 
+_WARNED = [0]
+
+
+def _safe_err(e: Exception, path) -> str:
+    """Exception summary for logs with the clip path/name scrubbed (no test-data info in logs)."""
+    msg = str(e).replace(str(path), "<clip>").replace(Path(str(path)).name, "<clip>")
+    return f"{type(e).__name__}: {msg[:160]}"
+
+
 def _probe_audio():
     t = np.arange(SR) / SR
     return (0.05 * np.sin(2 * np.pi * 200 * t) + 0.01 * np.random.default_rng(0).standard_normal(SR)).astype(np.float32)
@@ -137,17 +146,19 @@ class Transcriber:
         try:
             text = self.transcribe_array(audio)
         except Exception as e:  # never lose a row: retry with the sequential decoder, then give up quietly
-            print(f"[infer] batched decode failed for {path}: {e!r}; retrying sequentially", flush=True)
+            _WARNED[0] += 1
+            if _WARNED[0] <= 5:
+                print(f"[infer] batched decode failed ({_safe_err(e, path)}); retrying sequentially", flush=True)
             try:
                 segs, _ = self.model.transcribe(audio, language=self.cfg["language"], beam_size=self.beam,
                                                 without_timestamps=False, condition_on_previous_text=False)
                 text = " ".join(s.text.strip() for s in segs)
             except Exception as e2:
-                raise RuntimeError(f"both decoders failed for {path}: {e2!r}") from e2
+                raise RuntimeError(f"both decoders failed ({_safe_err(e2, path)})") from None
         return postprocess(text, self.lex, self.cfg.get("rules"))
 
 
-def transcribe_many(t: Transcriber, paths, log_every=25):
+def transcribe_many(t: Transcriber, paths, log_every=100):
     out, t0, failed = [], time.time(), 0
     budget = t.cfg["time_budget_s"]
     n = len(paths)
@@ -156,7 +167,8 @@ def transcribe_many(t: Transcriber, paths, log_every=25):
             out.append(t.transcribe_file(p))
         except Exception as e:  # one bad clip must not kill the run: emit "" for it, but count it
             failed += 1
-            print(f"[infer] FAILED {p}: {e!r}", flush=True)
+            if failed <= 5:  # keep the log budget (500 lines) free for the real stack trace
+                print(f"[infer] clip {i} FAILED ({_safe_err(e, p)})", flush=True)
             out.append("")
         el = time.time() - t0
         if t.beam > 1 and el / (i + 1) * n > budget:
