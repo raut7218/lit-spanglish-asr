@@ -19,6 +19,8 @@ def main():
     ap.add_argument("--export", required=True, help="dir produced by lit.export (has ct2/ + casing_lexicon.json)")
     ap.add_argument("--out", default="submission.zip")
     ap.add_argument("--cfg", default="{}", help="JSON overrides for infer_config.json (language, beam_size, ...)")
+    ap.add_argument("--cfg_file", help="JSON file with the overrides (wins over --cfg)")
+    ap.add_argument("--lexicon", action="store_true", help="ship casing_lexicon.json (off by default: it hurt dev WER)")
     a = ap.parse_args()
 
     exp = Path(a.export)
@@ -30,9 +32,9 @@ def main():
         shutil.copy(ROOT / "src" / "lit" / f, stage / "lit" / f)
     (stage / "model").mkdir()
     shutil.copytree(exp / "ct2", stage / "model" / "ct2")
-    if (exp / "casing_lexicon.json").exists():
+    if a.lexicon and (exp / "casing_lexicon.json").exists():
         shutil.copy(exp / "casing_lexicon.json", stage / "model" / "casing_lexicon.json")
-    (stage / "model" / "infer_config.json").write_text(json.dumps(json.loads(a.cfg), indent=2))
+    (stage / "model" / "infer_config.json").write_text(json.dumps(json.loads(Path(a.cfg_file).read_text()) if a.cfg_file else json.loads(a.cfg), indent=2))
 
     out = Path(a.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)

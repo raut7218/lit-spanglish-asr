@@ -1,0 +1,6 @@
+{
+  "language": "es",
+  "beam_size": 5,
+  "compute_type": "float16",
+  "rules": ["expand_gonna", "capital_i", "ah_to_uh", "drop_um"]
+}

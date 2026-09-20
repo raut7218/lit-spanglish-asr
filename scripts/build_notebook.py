@@ -183,7 +183,8 @@ quant = "float32" if SMOKE else "float16"
 sh(f"{PY} -m lit.export --model {BASE} --adapter {RUN/'final_adapter'} --data_dir {PREP} --out {EXPORT} --quantization {quant}", cwd=REPO, env=ENV)
 ZIP = RUN / "submission.zip"
 cfg_json = json.dumps({"language": LANGUAGE, "beam_size": 2 if SMOKE else 5, "compute_type": "float16"})
-sh(f"{PY} scripts/make_submission.py --export {EXPORT} --out {ZIP} --cfg '{cfg_json}'", cwd=REPO, env=ENV)
+cfg_arg = f"--cfg '{cfg_json}'" if SMOKE else f"--cfg_file configs/infer_final.json"   # real runs ship the tuned decoding + convention rules
+sh(f"{PY} scripts/make_submission.py --export {EXPORT} --out {ZIP} {cfg_arg}", cwd=REPO, env=ENV)
 ''')
 
 code('''
