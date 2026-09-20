@@ -24,7 +24,7 @@ Run the cells top to bottom. Every stage is resumable: checkpoints and outputs l
 **Before you start**
 1. Runtime → *Change runtime type* → GPU (T4 free tier works; A100/L4 = faster/better).
 2. **Data is uploaded once**: the data cell asks you to pick the two archives (`…miami.tar.gz`, `…enspa_dev.tar.gz`) from your
-   computer and saves them to `MyDrive/lit_data/`; every later run reads them from Drive (prepared clips are cached there too).
+   computer and saves them to `MyDrive/lit_data/` (any subfolder of it is also found); every later run reads them from Drive (prepared clips are cached there too).
    They are never sent anywhere else.
 3. **Private repo**: create a GitHub token (Settings → Developer settings → Fine-grained tokens → this repo, *Contents: read*) and add it as
    a Colab secret named `GITHUB_TOKEN` (key icon in the left bar, enable *Notebook access*).
@@ -109,13 +109,14 @@ RAW, PREP = WORK / "raw", WORK / "data_prepared"
 src = DRIVE / DRIVE_DATA
 src.mkdir(parents=True, exist_ok=True)
 def find_tars():
-    return (next(iter(glob.glob(str(src / "*miami*.tar.gz"))), None),
-            next(iter(glob.glob(str(src / "*enspa_dev*.tar.gz"))), None))
+    """Search DRIVE_DATA recursively, so it works whether the archives sit in lit_data/ or lit_data/data/."""
+    hit = lambda pat: next(iter(sorted(glob.glob(str(src / "**" / pat), recursive=True))), None)
+    return hit("*miami*.tar.gz"), hit("*enspa_dev*.tar.gz")
 miami_tar, dev_tar = find_tars()
 if not (miami_tar and dev_tar):
     print(f"Archives not on Drive yet ({src}). One-time upload: choose BOTH .tar.gz files from your computer "
           "(miami + enspa_dev). They are saved to your Drive, so later runs skip this step.\\n"
-          "(If the browser upload is slow/fails, drag the two files into Drive > lit_data/ in another tab instead, then re-run this cell.)")
+          "(If the browser upload is slow/fails, drag the two files into Drive > lit_data/ (any subfolder) in another tab instead, then re-run this cell.)")
     if IN_COLAB and "google.colab" in sys.modules:
         from google.colab import files
         up = files.upload()                       # opens a file picker on your computer
