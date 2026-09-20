@@ -33,6 +33,7 @@ DEFAULT_CFG = dict(
     repetition_penalty=1.0,
     no_repeat_ngram_size=0,
     max_new_tokens_per_s=8.0,
+    rules=[],  # names from lit.rules.RULES applied after normalisation
     time_budget_s=6000,  # degrade to greedy if the projected total exceeds this
 )
 
@@ -143,7 +144,7 @@ class Transcriber:
                 text = " ".join(s.text.strip() for s in segs)
             except Exception as e2:
                 raise RuntimeError(f"both decoders failed for {path}: {e2!r}") from e2
-        return postprocess(text, self.lex)
+        return postprocess(text, self.lex, self.cfg.get("rules"))
 
 
 def transcribe_many(t: Transcriber, paths, log_every=25):

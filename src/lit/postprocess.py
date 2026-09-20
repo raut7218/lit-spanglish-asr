@@ -6,6 +6,7 @@ import re
 
 from .casing import apply_casing
 from .normalize import norm
+from .rules import apply_rules
 
 
 def collapse_loops(text: str, max_repeat: int = 4) -> str:
@@ -28,9 +29,10 @@ def collapse_loops(text: str, max_repeat: int = 4) -> str:
     return " ".join(words)
 
 
-def postprocess(text: str, lexicon: dict | None = None) -> str:
+def postprocess(text: str, lexicon: dict | None = None, rules=None) -> str:
     text = re.sub(r"<\|[^|]*\|>", " ", text or "")
     text = collapse_loops(text)
     if lexicon:
         text = apply_casing(text, lexicon)
-    return norm(text)
+    text = norm(text)
+    return apply_rules(text, rules) if rules else text

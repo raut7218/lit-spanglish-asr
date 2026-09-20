@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "infer.py"]
+LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "rules.py", "infer.py"]
 
 
 def main():
