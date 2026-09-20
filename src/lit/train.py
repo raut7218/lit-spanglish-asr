@@ -62,7 +62,11 @@ def load_config(path, overrides=()):
                 cfg[k] = v
     for o in overrides:
         k, v = o.split("=", 1)
-        cfg[k] = yaml.safe_load(v)
+        d = cfg
+        *path, last = k.split(".")  # dotted keys reach nested dicts: lora.r=64
+        for part in path:
+            d = d[part]
+        d[last] = yaml.safe_load(v)
     return cfg
 
 

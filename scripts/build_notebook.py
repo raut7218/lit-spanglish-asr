@@ -33,7 +33,7 @@ Run the cells top to bottom. Every stage is resumable: checkpoints and outputs l
 
 code('''
 # ---- settings ---------------------------------------------------------------------------------
-SMOKE      = True                     # True: tiny model + 3 conversations, proves the pipeline. False: real run
+SMOKE      = False                    # True: tiny model + 3 conversations (pipeline check). False: real run
 PRESET     = "auto"                   # "t4" | "a100" | "auto" (pick by GPU)
 RUN_NAME   = "run1"                   # a new name = a fresh run; the same name = resume
 REPO_URL   = "https://github.com/raut7218/lit-spanglish-asr.git"   # private repo: add a Colab secret GITHUB_TOKEN (see below)
@@ -42,6 +42,8 @@ DRIVE_RUNS = "MyDrive/lit_runs"       # checkpoints / exports are written here
 LANGUAGE   = "es"                     # decoder language token ("es" or "en"); compare both on dev
 ZERO_SHOT_BASELINE = True             # score the un-tuned base model on dev first (sanity + reference)
 DOWNLOAD_ZIP       = False            # True: also push submission.zip to your computer at the end (it is always saved on Drive)
+MODEL      = None                     # None = the preset's model; or e.g. "openai/whisper-large-v3"
+EXTRA_SET  = ""                       # extra train overrides, e.g. "lr=2e-4 epochs=4 lora.r=64"
 MAX_TRAIN_MINUTES  = 0                # e.g. 210 stops training cleanly before a Colab session limit; re-run to resume
 ''')
 
@@ -151,7 +153,7 @@ code('''
 # ---- zero-shot baseline (un-tuned base model on the honest dev set) ----------------------------
 import yaml
 cfg0 = yaml.safe_load(open(REPO / CONFIG))
-BASE = cfg0["model"]
+BASE = MODEL or cfg0["model"]
 if ZERO_SHOT_BASELINE:
     for lang in ("es", "en"):
         print(f"--- zero-shot {BASE}, language token = {lang}")
@@ -161,7 +163,7 @@ if ZERO_SHOT_BASELINE:
 code('''
 # ---- train (LoRA) — resumable: just re-run this cell after a disconnect -------------------------
 RUN = DRIVE / DRIVE_RUNS / (RUN_NAME + ("_smoke" if SMOKE else ""))
-sets = f"data_dir={PREP} out_dir={RUN} language={LANGUAGE} max_train_minutes={MAX_TRAIN_MINUTES}"
+sets = f"model={BASE} data_dir={PREP} out_dir={RUN} language={LANGUAGE} max_train_minutes={MAX_TRAIN_MINUTES} {EXTRA_SET}"
 sh(f"{PY} -u -m lit.train --config {CONFIG} --set {sets}", cwd=REPO, env=ENV)
 print(open(RUN / "final_adapter" / "final.json").read()[:600] if (RUN / "final_adapter" / "final.json").exists() else "training not finished yet - re-run this cell to resume")
 ''')
