@@ -1,4 +1,4 @@
-"""Generate notebooks/colab_pipeline_v2.ipynb (v2 recipe: tests -> data -> baseline -> train -> analyse -> zip -> validate)."""
+"""Generate notebooks/colab_pipeline.ipynb (v2 recipe: tests -> data -> baseline -> train -> analyse -> zip -> validate)."""
 
 import json
 from pathlib import Path
@@ -159,6 +159,6 @@ if DOWNLOAD_ZIP and IN_COLAB and "google.colab" in sys.modules:
 
 nb = {"cells": CELLS, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
                                   "language_info": {"name": "python"}, "accelerator": "GPU"}, "nbformat": 4, "nbformat_minor": 5}
-out = Path(__file__).resolve().parents[1] / "notebooks" / "colab_pipeline_v2.ipynb"
+out = Path(__file__).resolve().parents[1] / "notebooks" / "colab_pipeline.ipynb"
 out.write_text(json.dumps(nb, indent=1))
 print("wrote", out, len(CELLS), "cells")

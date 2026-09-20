@@ -213,7 +213,7 @@ md("""
 nb = {"cells": CELLS, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
                                   "language_info": {"name": "python"}, "accelerator": "GPU"},
       "nbformat": 4, "nbformat_minor": 5}
-out = Path(__file__).resolve().parents[1] / "notebooks" / "colab_pipeline.ipynb"
+out = Path(__file__).resolve().parents[1] / "notebooks" / "colab_pipeline_v1.ipynb"
 out.parent.mkdir(exist_ok=True)
 out.write_text(json.dumps(nb, indent=1))
 print("wrote", out, len(CELLS), "cells")
