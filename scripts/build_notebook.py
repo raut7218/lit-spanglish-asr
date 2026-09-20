@@ -41,6 +41,7 @@ DRIVE_DATA = "MyDrive/lit_data"       # folder in Drive holding the two .tar.gz 
 DRIVE_RUNS = "MyDrive/lit_runs"       # checkpoints / exports are written here
 LANGUAGE   = "es"                     # decoder language token ("es" or "en"); compare both on dev
 ZERO_SHOT_BASELINE = True             # score the un-tuned base model on dev first (sanity + reference)
+DOWNLOAD_ZIP       = False            # True: also push submission.zip to your computer at the end (it is always saved on Drive)
 MAX_TRAIN_MINUTES  = 0                # e.g. 210 stops training cleanly before a Colab session limit; re-run to resume
 ''')
 
@@ -190,7 +191,7 @@ print("\\nsubmission.zip:", ZIP, f"({ZIP.stat().st_size/1e9:.2f} GB)")
 
 code('''
 # ---- download the zip (upload it on the competition "Submissions" page; run the platform smoke test first) --
-if IN_COLAB and "google.colab" in sys.modules:
+if DOWNLOAD_ZIP and IN_COLAB and "google.colab" in sys.modules:
     from google.colab import files
     files.download(str(ZIP))     # it is also saved on Drive next to the checkpoints
 ''')
