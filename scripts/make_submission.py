@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -38,17 +39,24 @@ def main():
 
     out = Path(a.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        out.unlink()
-    with zipfile.ZipFile(out, "w") as z:
+    # Build on LOCAL disk (zipfile seeks back to patch headers, which network/FUSE mounts such as Colab's
+    # Drive handle badly), then copy sequentially to the destination and verify the copy.
+    local = Path(tempfile.mkdtemp()) / "submission.zip"
+    with zipfile.ZipFile(local, "w") as z:
         for p in sorted(stage.rglob("*")):
             if p.is_file():
                 rel = p.relative_to(stage).as_posix()
                 z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix == ".bin" else zipfile.ZIP_DEFLATED)
     shutil.rmtree(stage)
-    with zipfile.ZipFile(out) as z:
+    if out.exists():
+        out.unlink()
+    shutil.copyfile(local, out)
+    os.sync()
+    assert out.stat().st_size == local.stat().st_size, "copied zip has a different size"
+    with zipfile.ZipFile(out) as z:  # reads the central directory back from the destination
         names = z.namelist()
         assert "main.py" in names, "main.py must be at the zip root"
+    shutil.rmtree(local.parent, ignore_errors=True)
     print(f"[make_submission] {out} ({out.stat().st_size/1e9:.2f} GB, {len(names)} files, main.py at root)")
 
 
