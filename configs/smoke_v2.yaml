@@ -1,0 +1,19 @@
+# Local smoke test of the v2 recipe with a tiny model (exercises windows, sampler, GPU aug, freeze, EMA, multi-val).
+model: openai/whisper-tiny
+language: es
+data_dir: /home/gaurav/work/prep2
+out_dir: /home/gaurav/work/runs/smoke_v2
+dtype: fp32
+lora: {r: 8, alpha: 16, dropout: 0.0, encoder_from_layer: 2, decoder: true}
+lr: 5.0e-4
+warmup_steps: 2
+batch_size: 4
+grad_accum: 2
+max_steps: 6
+epoch_samples: 96
+eval_steps: 3
+save_steps: 3
+keep_best: 2
+eval_batch_size: 4
+val: {holdout_turn: 6, holdout_window: 4}
+num_workers: 2

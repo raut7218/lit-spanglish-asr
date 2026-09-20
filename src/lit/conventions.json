@@ -1,0 +1,9 @@
+{
+  "_provenance": "scripts/convention_audit.py on dev refs vs Bangor Miami targets (per-1k-word frequencies). Only rules with clear evidence are listed.",
+  "expand": {
+    "gonna": "going to", "wanna": "want to", "gotta": "got to", "kinda": "kind of", "lemme": "let me", "gimme": "give me"
+  },
+  "rename": {
+    "ah": "uh"
+  }
+}

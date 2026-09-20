@@ -10,7 +10,17 @@ SR = 16000
 
 
 def load_audio(path, sr: int = SR, start: float | None = None, dur: float | None = None) -> np.ndarray:
-    """Decode any audio file to mono float32 at `sr` using ffmpeg."""
+    """Decode any audio file to mono float32 at `sr`. FLAC/WAV at the right rate are read in-process (fast, no
+    subprocess spawn); everything else goes through ffmpeg."""
+    if start is None and dur is None and str(path).lower().endswith((".flac", ".wav")):
+        try:
+            import soundfile as sf
+
+            x, file_sr = sf.read(str(path), dtype="float32", always_2d=False)
+            if file_sr == sr:
+                return x if x.ndim == 1 else x.mean(1)
+        except Exception:
+            pass
     cmd = ["ffmpeg", "-nostdin", "-v", "error"]
     if start is not None:
         cmd += ["-ss", f"{start:.3f}"]

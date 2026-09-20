@@ -37,17 +37,20 @@ def pad_batch(arrs: list[np.ndarray]) -> torch.Tensor:
 
 
 def spec_augment(feats: torch.Tensor, lengths_frames: list[int], n_freq=2, freq_w=27, n_time=4, time_frac=0.05):
-    """In-place SpecAugment on (B, n_mels, T); time masks only within each clip's real frames."""
-    B, F, T = feats.shape
-    fill = 0.0  # after normalisation background is ~ (min+4)/4; zero is a fine neutral fill
-    for b in range(B):
-        for _ in range(n_freq):
-            w = int(np.random.randint(0, freq_w + 1))
-            f0 = int(np.random.randint(0, max(1, F - w)))
-            feats[b, f0 : f0 + w, :] = fill
-        L = max(10, lengths_frames[b])
-        for _ in range(n_time):
-            w = int(np.random.randint(0, max(1, int(time_frac * L)) + 1))
-            t0 = int(np.random.randint(0, max(1, L - w)))
-            feats[b, :, t0 : t0 + w] = fill
-    return feats
+    """Vectorised SpecAugment on (B, n_mels, T): frequency masks anywhere, time masks only inside each clip's real
+    frames. No Python loop over the batch (the old version issued ~6 tiny kernels per sample)."""
+    B, F_, T = feats.shape
+    dev = feats.device
+    lens = torch.as_tensor(lengths_frames, device=dev).clamp(min=10)
+    fa, ta = torch.arange(F_, device=dev)[None, :], torch.arange(T, device=dev)[None, :]
+    fmask = torch.zeros(B, F_, dtype=torch.bool, device=dev)
+    for _ in range(n_freq):
+        w = torch.randint(0, freq_w + 1, (B,), device=dev)
+        f0 = (torch.rand(B, device=dev) * (F_ - w).clamp(min=1)).long()
+        fmask |= (fa >= f0[:, None]) & (fa < (f0 + w)[:, None])
+    tmask = torch.zeros(B, T, dtype=torch.bool, device=dev)
+    for _ in range(n_time):
+        w = (torch.rand(B, device=dev) * (time_frac * lens).clamp(min=1)).long()
+        t0 = (torch.rand(B, device=dev) * (lens - w).clamp(min=1)).long()
+        tmask |= (ta >= t0[:, None]) & (ta < (t0 + w)[:, None])
+    return feats.masked_fill(fmask[:, :, None] | tmask[:, None, :], 0.0)

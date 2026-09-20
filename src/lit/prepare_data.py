@@ -5,7 +5,9 @@
 Miami: parse CHAT, merge same-speaker utterances into single-speaker clips (<=29 s, random target
 length so lengths resemble voice notes), drop clips that overlap other speakers / unintelligible
 speech, split by SPEAKER (a speaker-disjoint hold-out), write FLAC + manifests.
-Dev (35 min, WhatsApp-style): converted 1:1 and used ONLY as validation.
+Targets get the dev/test spelling conventions (conventions.json); clip lengths follow the dev duration
+distribution; ~1.5% empty-target room-noise clips; hold-out ~2 h speaker-disjoint.
+Dev (35 min, WhatsApp-style): converted 1:1 (+ per-speaker files); validation, and optionally training (train.py).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import csv
 import json
 import random
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -23,7 +25,8 @@ import numpy as np
 import soundfile as sf
 
 from .audio import SR, load_audio
-from .chat import Utt, parse_cha, read_participants
+from .chat import Utt, parse_cha, read_participants, spa_frac_of, token_language_table
+from .conventions import apply_conventions, load_conventions
 from .normalize import norm
 
 MAX_CLIP_S = 29.0
@@ -45,7 +48,7 @@ def _covered(intervals, lo, hi):
     return total / 1000.0
 
 
-def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15):
+def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15, length_sampler=None, conv=None):
     """Group utterances of one conversation into single-speaker clips. Returns list of dicts."""
     utts = sorted(utts, key=lambda u: (u.start_ms, u.end_ms))
     # (speaker, interval) for anything that is NOT transcribed text of the clip's own speaker
@@ -80,7 +83,7 @@ def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15):
     for run in runs:
         i = 0
         while i < len(run):
-            target = rng.uniform(6.0, MAX_CLIP_S)
+            target = length_sampler(rng) if length_sampler else rng.uniform(6.0, MAX_CLIP_S)
             j = i
             while j + 1 < len(run) and (run[j + 1].end_ms - run[i].start_ms) / 1000.0 + 2 * PAD_S <= target:
                 j += 1
@@ -91,7 +94,7 @@ def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15):
                 i = j + 1
                 continue
             group = run[i : j + 1]
-            text = " ".join(u.text for u in group).strip()  # styled: sentence punctuation kept
+            text = apply_conventions(" ".join(u.text for u in group).strip(), conv)  # styled; dev/test spelling conventions
             others = [
                 (x.start_ms, x.end_ms)
                 for x in utts
@@ -105,22 +108,95 @@ def build_clips(utts: list[Utt], rng: random.Random, max_overlap: float = 0.15):
             if ok:
                 clips.append(
                     dict(start=start_ms / 1000.0, end=end_ms / 1000.0, duration=dur, text=text,
-                         speaker=group[0].speaker, overlap=round(overlap, 3),
+                         speaker=group[0].speaker, kind="turn", overlap=round(overlap, 3),
                          spa_frac=round(n_spa / max(1, n_spa + n_eng), 3))
                 )
             i = j + 1
     return clips
 
 
+def _pair_overlap_s(group: list[Utt]) -> float:
+    """Seconds during which two DIFFERENT speakers are both marked as talking inside `group`."""
+    tot = 0.0
+    for a in range(len(group)):
+        for b in range(a + 1, len(group)):
+            x, y = group[a], group[b]
+            if x.speaker != y.speaker:
+                tot += max(0.0, min(x.end_ms, y.end_ms) - max(x.start_ms, y.start_ms)) / 1000.0
+    return tot
+
+
+def build_windows(utts: list[Utt], rng: random.Random, length_sampler, conv=None, max_sim: float = 0.10):
+    """Conversation windows: consecutive utterances of BOTH speakers packed into one long clip whose target is
+    everything said, in order. Real voice notes are 10-60 s; Miami single-speaker turns are ~4 s, which left
+    ~85% of every 30 s Whisper window empty. Windows with simultaneous speech, unintelligible stretches or
+    speech that leaks in from outside the window are dropped."""
+    us = sorted(utts, key=lambda u: (u.start_ms, u.end_ms))
+    clips, i = [], 0
+    while i < len(us):
+        if length_sampler and rng.random() > 0.4:
+            target = max(8.0, length_sampler(rng))  # dev-like lengths (median ~13 s)
+        else:
+            target = rng.uniform(18.0, MAX_CLIP_S)  # long windows: use more of the 30 s encoder pass
+        j, end_ms = i, us[i].end_ms
+        while j + 1 < len(us) and (max(end_ms, us[j + 1].end_ms) - us[i].start_ms) / 1000.0 + 2 * PAD_S <= target:
+            j += 1
+            end_ms = max(end_ms, us[j].end_ms)
+        group = us[i : j + 1]
+        start_ms = max(0, group[0].start_ms - int(PAD_S * 1000))
+        end_ms = end_ms + int(PAD_S * 1000)
+        dur = (end_ms - start_ms) / 1000.0
+        nxt = j + 1
+        if dur <= MAX_CLIP_S + 0.5 and len(group) >= 2:
+            bad = any(u.has_unintelligible or (not norm(u.text) and u.dur > 1.5) for u in group)
+            outside = [(x.start_ms, x.end_ms) for x in us if x not in group and x.end_ms > start_ms and x.start_ms < end_ms]
+            text = apply_conventions(" ".join(u.text for u in group if norm(u.text)).strip(), conv)
+            n_words = len(norm(text).split())
+            ok = (not bad and _pair_overlap_s(group) / dur <= max_sim and _covered(outside, start_ms, end_ms) / dur <= 0.05
+                  and n_words >= 6 and 0.4 <= n_words / dur <= 6.0)
+            if ok:
+                n_spa, n_eng = sum(u.n_spa for u in group), sum(u.n_eng for u in group)
+                clips.append(dict(start=start_ms / 1000.0, end=end_ms / 1000.0, duration=dur, text=text, speaker="mix", kind="window",
+                                  overlap=round(_pair_overlap_s(group) / dur, 3), spa_frac=round(n_spa / max(1, n_spa + n_eng), 3)))
+        i = nxt
+    return clips
+
+
+def nonspeech_clips(utts: list[Utt], total_s: float, rng: random.Random, max_n: int):
+    """Room-noise slices (2-6 s) from stretches where NO speaker has a time-marked utterance: empty-target
+    training examples that teach the model to output nothing on silence/noise instead of hallucinating."""
+    iv = sorted((u.start_ms / 1000.0, u.end_ms / 1000.0) for u in utts)
+    gaps, cur = [], 0.0
+    for a, b in iv:
+        if a - cur >= 3.0:
+            gaps.append((cur + 0.4, a - 0.4))
+        cur = max(cur, b)
+    if total_s - cur >= 3.0:
+        gaps.append((cur + 0.4, total_s - 0.4))
+    rng.shuffle(gaps)
+    out = []
+    for lo, hi in gaps[:max_n]:
+        d = min(hi - lo, rng.uniform(2.0, 6.0))
+        if d >= 1.5:
+            s0 = rng.uniform(lo, hi - d)
+            out.append(dict(start=s0, end=s0 + d, duration=d, text="", speaker="-", kind="nonspeech", overlap=0.0, spa_frac=None, nonspeech=True))
+    return out
+
+
 def _process_conv(args):
-    cha, mp3, out_dir, seed, max_overlap = args
+    cha, mp3, out_dir, seed, max_overlap, dev_durs, conv_map, nonspeech_frac, window_clips = args
     conv = Path(cha).stem
     utts = parse_cha(cha)
     rng = random.Random(f"{seed}-{conv}")
-    clips = build_clips(utts, rng, max_overlap)
+    sampler = (lambda r: min(MAX_CLIP_S, max(4.0, r.choice(dev_durs) * r.uniform(0.85, 1.15)))) if dev_durs else None
+    clips = build_clips(utts, rng, max_overlap, sampler, conv_map)
+    if window_clips:
+        clips += build_windows(utts, rng, sampler, conv_map)
     if not clips:
         return conv, []
     audio = load_audio(mp3, SR)
+    if nonspeech_frac > 0:
+        clips += nonspeech_clips(utts, len(audio) / SR, rng, max(1, int(len(clips) * nonspeech_frac)))
     rows = []
     (Path(out_dir) / "clips").mkdir(parents=True, exist_ok=True)
     for k, c in enumerate(clips):
@@ -197,11 +273,15 @@ def main(argv=None):
     ap.add_argument("--miami_dir", required=True)
     ap.add_argument("--dev_dir", required=True)
     ap.add_argument("--out_dir", required=True)
-    ap.add_argument("--holdout_hours", type=float, default=1.5)
+    ap.add_argument("--holdout_hours", type=float, default=2.0)
     ap.add_argument("--max_overlap", type=float, default=0.15)
     ap.add_argument("--max_convs", type=int, default=0, help="debug: only first N conversations")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=13)
+    ap.add_argument("--conventions", default="default", help='"default" (src/lit/conventions.json), "none", or a JSON path')
+    ap.add_argument("--nonspeech_frac", type=float, default=0.015, help="empty-target noise clips as a fraction of clips")
+    ap.add_argument("--no_windows", action="store_true", help="skip the long two-speaker conversation windows")
+    ap.add_argument("--uniform_lengths", action="store_true", help="old behaviour: clip lengths ~ U(6,29) instead of the dev distribution")
     a = ap.parse_args(argv)
 
     miami, dev, out = Path(a.miami_dir), Path(a.dev_dir), Path(a.out_dir)
@@ -210,8 +290,11 @@ def main(argv=None):
     chas = [c for c in chas if (miami / "audios" / f"{c.stem}.mp3").exists()]
     if a.max_convs:
         chas = chas[: a.max_convs]
-    jobs = [(str(c), str(miami / "audios" / f"{c.stem}.mp3"), str(out), a.seed, a.max_overlap) for c in chas]
-    print(f"[prepare] {len(jobs)} Miami conversations")
+    dev_rows = prepare_dev(dev, out)  # first: its duration distribution drives the Miami clip lengths
+    dev_durs = None if a.uniform_lengths else [r["duration"] for r in dev_rows]
+    conv_map = None if a.conventions == "none" else load_conventions(None if a.conventions == "default" else a.conventions)
+    jobs = [(str(c), str(miami / "audios" / f"{c.stem}.mp3"), str(out), a.seed, a.max_overlap, dev_durs, conv_map, a.nonspeech_frac, not a.no_windows) for c in chas]
+    print(f"[prepare] {len(jobs)} Miami conversations; conventions={a.conventions}; lengths={'uniform' if a.uniform_lengths else 'dev-like'}")
     all_rows = []
     with ProcessPoolExecutor(a.workers) as ex:
         for conv, rows in ex.map(_process_conv, jobs):
@@ -227,11 +310,23 @@ def main(argv=None):
     hold = [r for r in all_rows if r["conv"] in held]
     write_jsonl(out / "train.jsonl", train)
     write_jsonl(out / "miami_holdout.jsonl", hold)
-    dev_rows = prepare_dev(dev, out)
+
+    # token -> P(spanish) from the Miami language tags; used to place dev/test clips on the same Spanish-share axis
+    counts = Counter()
+    for c in chas:
+        parse_cha(c, counts)
+    table = token_language_table(counts)
+    (out / "token_lang.json").write_text(json.dumps(table, ensure_ascii=False))
+    for r in dev_rows:
+        r["spa_frac"] = spa_frac_of(r["text"], table)
+    write_jsonl(out / "dev.jsonl", dev_rows)
+    for spk in sorted({r["speaker"] for r in dev_rows if r.get("speaker")}):
+        write_jsonl(out / f"dev_spk{spk}.jsonl", [r for r in dev_rows if r.get("speaker") == spk])
 
     def h(rows):
         return sum(r["duration"] for r in rows) / 3600
 
+    print(f"[prepare] non-speech clips: train {sum(1 for r in train if r.get('nonspeech'))}, holdout {sum(1 for r in hold if r.get('nonspeech'))}")
     print(f"[prepare] train {len(train)} clips {h(train):.2f} h | holdout {len(hold)} clips {h(hold):.2f} h "
           f"(convs: {sorted(held)}) | dev {len(dev_rows)} clips {h(dev_rows):.2f} h")
     print(f"[prepare] speaker-disjoint components: {len(comps)}")

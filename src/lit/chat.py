@@ -54,7 +54,7 @@ def style_text(s: str) -> str:
     return s if s.strip(" .?!") else ""
 
 
-def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
+def clean_chat_text(raw: str, collect=None) -> tuple[str, bool, int, int]:
     """CHAT main-tier text -> plain verbatim words.
 
     Returns (text, has_unintelligible, n_spanish_tokens, n_english_tokens).
@@ -79,16 +79,24 @@ def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
     toks, n_spa, n_eng = [], 0, 0
     for tok in s.split():
         m = LANG_TAG_RE.search(tok)
+        lang = None
         if m:
             tag = m.group(1)
             n_spa += tag.startswith("spa")
             n_eng += tag.startswith("eng") and "&" not in tag
+            lang = "spa" if tag.startswith("spa") else ("eng" if tag.startswith("eng") and "&" not in tag else None)
             tok = LANG_TAG_RE.sub("", tok)
         elif re.search(r"[A-Za-zÀ-ÿ]", tok):
             n_spa += spa_default
             n_eng += not spa_default
+            lang = "spa" if spa_default else "eng"
         tok = re.sub(r"\(([^)]*)\)", r"\1", tok)  # thi(nk) -> think, (be)cause -> because
         tok = tok.replace("_", " ") if tok.lower() != "o_k" else "okay"
+        if collect is not None and lang:
+            for part in tok.split():
+                w = re.sub(r"[^a-zà-ÿ']", "", part.lower())
+                if w:
+                    collect[(w, lang)] += 1
         toks.append(tok)
     s = " ".join(toks)
     s = re.sub(r"[+^~≈↑↓⌈⌉⌊⌋‹›]", " ", s)
@@ -96,7 +104,7 @@ def clean_chat_text(raw: str) -> tuple[str, bool, int, int]:
     return s, unintelligible, n_spa, n_eng
 
 
-def parse_cha(path: Path) -> list[Utt]:
+def parse_cha(path: Path, collect=None) -> list[Utt]:
     """Return utterances that carry a time mark, in file order."""
     raw_lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     tier_lines: list[str] = []
@@ -120,6 +128,21 @@ def parse_cha(path: Path) -> list[Utt]:
         start, end = int(marks[-1][0]), int(marks[-1][1])
         if end <= start:
             continue
-        text, unint, n_spa, n_eng = clean_chat_text(body)
+        text, unint, n_spa, n_eng = clean_chat_text(body, collect)
         utts.append(Utt(speaker, body, text, start, end, n_spa, n_eng, unint))
     return utts
+
+
+def spa_frac_of(text: str, table: dict) -> float | None:
+    """Estimated share of Spanish among the tokens of `text` (token -> P(spanish) table built from Miami tags)."""
+    ps = [table[w] for w in re.findall(r"[a-zà-ÿ']+", text.lower()) if w in table]
+    return round(sum(ps) / len(ps), 3) if ps else None
+
+
+def token_language_table(counts, min_count: int = 3) -> dict:
+    """{(word, lang): n} -> {word: P(spa)} for words seen >= min_count times with an unambiguous tag."""
+    tot: dict = {}
+    for (w, lang), n in counts.items():
+        a = tot.setdefault(w, [0, 0])
+        a[0 if lang == "spa" else 1] += n
+    return {w: a[0] / (a[0] + a[1]) for w, a in tot.items() if a[0] + a[1] >= min_count}

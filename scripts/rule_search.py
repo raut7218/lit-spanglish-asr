@@ -1,12 +1,13 @@
-"""Score post-processing rules on a dev predictions dump (`lit.evaluate --dump`).
+"""Score post-processing rules on prediction dumps (`lit.evaluate --dump`), on SEVERAL sets at once.
 
-    python scripts/rule_search.py preds.csv
+    python scripts/rule_search.py dev_preds.csv holdout_preds.csv [--out chosen_rules.json]
 
-Prints baseline WER, each rule's individual delta, then a greedy combination (keeps a rule only
-if it lowers WER), plus ref/hyp counts of the tokens the rules touch.
+A rule is kept only if it lowers the pooled WER and does not raise the WER of any single set (so a rule tuned to
+one conversation cannot slip in). Prints per-set WER for the baseline, each rule and the greedy combination.
 """
+import argparse
+import json
 import sys
-from collections import Counter
 from pathlib import Path
 
 import jiwer
@@ -15,24 +16,36 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from lit.rules import RULES, apply_rules  # noqa: E402
 
-df = pd.read_csv(sys.argv[1]).fillna("")
-refs, hyps = df["ref"].astype(str).tolist(), df["hyp"].astype(str).tolist()
-W = lambda h: jiwer.wer(refs, h)
-base = W(hyps)
-print(f"baseline WER {base:.4f}")
-rc, hc = Counter(w for r in refs for w in r.split()), Counter(w for h in hyps for w in h.split())
-for w in ["gonna", "going", "wanna", "want", "um", "uh", "ah", "eh", "mm", "hmm", "i", "I", "okay", "ok"]:
-    print(f"  {w:6s} ref {rc[w]:4d} hyp {hc[w]:4d}")
-print("\nindividual rules:")
+ap = argparse.ArgumentParser()
+ap.add_argument("csvs", nargs="+")
+ap.add_argument("--out")
+a = ap.parse_args()
+sets = {}
+for p in a.csvs:
+    df = pd.read_csv(p).fillna("")
+    sets[Path(p).stem] = (df["ref"].astype(str).tolist(), df["hyp"].astype(str).tolist())
+
+
+def score(rules):
+    per = {k: jiwer.wer(r, [apply_rules(h, rules) for h in hy]) for k, (r, hy) in sets.items()}
+    allr = [x for r, _ in sets.values() for x in r]
+    allh = [apply_rules(x, rules) for _, hy in sets.values() for x in hy]
+    return per, jiwer.wer(allr, allh)
+
+
+base, base_all = score([])
+print("baseline:", {k: round(v, 4) for k, v in base.items()}, "pooled", round(base_all, 4))
 delta = {}
 for n in RULES:
-    w = W([apply_rules(h, [n]) for h in hyps])
-    delta[n] = w - base
-    print(f"  {n:14s} {w:.4f}  ({w-base:+.4f})")
-chosen, cur = [], base
+    per, allw = score([n])
+    delta[n] = allw - base_all
+    print(f"  {n:14s}", {k: f"{v-base[k]:+.4f}" for k, v in per.items()}, f"pooled {allw-base_all:+.4f}")
+chosen, cur, cur_per = [], base_all, base
 for n in sorted(RULES, key=lambda k: delta[k]):
-    w = W([apply_rules(h, chosen + [n]) for h in hyps])
-    if w < cur - 1e-9:
+    per, allw = score(chosen + [n])
+    if allw < cur - 1e-9 and all(per[k] <= cur_per[k] + 1e-9 for k in per):
         chosen.append(n)
-        cur = w
-print(f"\ngreedy set: {chosen}  -> WER {cur:.4f}  ({cur-base:+.4f})")
+        cur, cur_per = allw, per
+print(f"chosen: {chosen}  pooled {cur:.4f} ({cur-base_all:+.4f}); per set", {k: round(v, 4) for k, v in cur_per.items()})
+if a.out:
+    Path(a.out).write_text(json.dumps(chosen))

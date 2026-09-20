@@ -24,7 +24,8 @@ def main(argv=None):
     ap.add_argument("--model", required=True)
     ap.add_argument("--adapter")
     ap.add_argument("--data_dir", required=True)
-    ap.add_argument("--split", default="dev", choices=["dev", "miami_holdout"])
+    ap.add_argument("--split", default="dev", choices=["dev", "dev_spk1", "dev_spk2", "miami_holdout"])
+    ap.add_argument("--kind", default="all", choices=["all", "turn", "window"], help="hold-out clip kind")
     ap.add_argument("--language", default="es")
     ap.add_argument("--beams", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=8)
@@ -37,6 +38,9 @@ def main(argv=None):
     dtype = pick_dtype(a.dtype) if device.type == "cuda" else torch.float32
     root = Path(a.data_dir)
     rows = read_manifest(root / f"{a.split}.jsonl")
+    rows = [r for r in rows if r.get("text", "").strip() and not r.get("nonspeech")]  # WER needs a non-empty reference
+    if a.kind != "all":
+        rows = [r for r in rows if r.get("kind", "turn") == a.kind]
     if a.max_clips:
         rows = rows[: a.max_clips]
     fe = WhisperFeatureExtractor.from_pretrained(a.model)

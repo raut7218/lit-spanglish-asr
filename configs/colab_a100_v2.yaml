@@ -1,0 +1,23 @@
+# v2 recipe, Colab A100 40 GB, Whisper large-v3.
+# Freeze encoder layers 0-15 (no backward through them), LoRA r=64 on encoder 16-31 + all decoder layers, no
+# gradient checkpointing (auto-fallback), GPU-side augmentation, EMA weights, macro(hold-out, dev) selection.
+model: openai/whisper-large-v3
+language: es
+data_dir: /content/data_prepared
+out_dir: /content/drive/MyDrive/lit_runs/run2
+dtype: bf16
+lora: {r: 64, alpha: 64, dropout: 0.0, encoder_from_layer: 16, decoder: true}
+lr: 1.0e-4
+warmup_steps: 50
+batch_size: 12
+grad_accum: 4            # effective batch 48
+max_steps: 1000
+epoch_samples: 14400
+eval_steps: 250
+save_steps: 250
+keep_best: 3
+eval_batch_size: 32
+val: {holdout_turn: 120, holdout_window: 60}
+num_workers: auto
+gradient_checkpointing: auto
+ema_decay: 0.999
