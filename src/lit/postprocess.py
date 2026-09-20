@@ -36,3 +36,22 @@ def postprocess(text: str, lexicon: dict | None = None, rules=None) -> str:
         text = apply_casing(text, lexicon)
     text = norm(text)
     return apply_rules(text, rules) if rules else text
+
+
+# Strings pandas.read_csv turns into NaN by default. A transcript equal to one of these (or empty) would be
+# read back as a missing value and the platform rejects the whole submission as "not valid".
+NA_LIKE = {"", "#n/a", "#n/a n/a", "#na", "-1.#ind", "-1.#qnan", "-nan", "1.#ind", "1.#qnan", "<na>", "n/a",
+           "na", "null", "nan", "none"}
+PLACEHOLDER = "no"  # costs the same WER as an empty hypothesis (1 error vs N deletions) but is never NaN
+
+
+def finalize_transcript(text) -> str:
+    """Last step before the CSV: a plain, non-empty, single-line string that survives pandas/csv round trips."""
+    t = "" if text is None else str(text)
+    t = re.sub(r"[\x00-\x1f\x7f]", " ", t)  # control chars (incl. newlines / tabs)
+    t = " ".join(t.split())  # any unicode whitespace (\u2028, \x85, nbsp ...) -> single space
+    if not t:
+        return PLACEHOLDER
+    if t.lower() in NA_LIKE:
+        return t + "."  # the scorer turns "." into a space, so the scored text is unchanged
+    return t

@@ -56,3 +56,38 @@ def test_falls_back_to_submission_format_and_listing(tmp_path, monkeypatch):
     assert m.read_clip_names() == ["x.mp3"]
     (data / "submission_format.csv").write_text("audio_filename,transcript\ny.mp3,hello world\n")
     assert m.read_clip_names() == ["y.mp3"]
+
+
+def test_empty_and_na_like_transcripts_never_become_nan(tmp_path, monkeypatch):
+    """Regression for the rejected submission: an empty transcript is read back as NaN by pandas."""
+    import pandas as pd
+
+    from lit.normalize import norm
+
+    data = tmp_path / "data"
+    (data / "clips").mkdir(parents=True)
+    names = [f"c{i}.mp3" for i in range(8)]
+    with open(data / "test_metadata.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["audio_filename", "file_duration_seconds", "language"])
+        for n in names:
+            w.writerow([n, 3, "enspa"])
+    out = tmp_path / "submission" / "submission.csv"
+    m = _load_main(monkeypatch, data, out)
+
+    class FakeT:
+        device = "cpu"
+
+    monkeypatch.setattr(m, "Transcriber", lambda *a, **k: FakeT())
+    fake = ["", "   ", "NA", "None", "null", "hola, que tal", None, "a b\x00c"]
+    monkeypatch.setattr(m, "transcribe_many", lambda t, paths: fake)
+    m.main()
+
+    df = pd.read_csv(out)  # pandas defaults, exactly how a validator would read it
+    assert list(df.columns) == ["audio_filename", "transcript"]
+    assert df["audio_filename"].tolist() == names
+    assert not df["transcript"].isna().any()
+    assert df["transcript"].map(lambda s: isinstance(s, str) and s.strip() != "").all()
+    assert norm(df["transcript"][2]) == norm("NA") and norm(df["transcript"][3]) == norm("None")  # scored text unchanged
+    assert df["transcript"][5] == "hola, que tal"
+    assert "\n" not in "".join(df["transcript"]) and " " not in "".join(df["transcript"])
