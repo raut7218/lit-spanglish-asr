@@ -1,0 +1,24 @@
+# v3 recipe, Colab A100 40 GB, Whisper large-v3: v2 + EMA warm-up fix + dev-weighted checkpoint selection.
+# Ablation knobs (pass with --set): lora.encoder_from_layer=0 lora.r=32 lora.alpha=64 (all-layer LoRA like v1),
+# dev_in_train=spk1|spk2|all, sampler.dev_share=0.15, max_steps=..., seed=...
+model: openai/whisper-large-v3
+language: es
+data_dir: /content/data_prepared
+out_dir: /content/drive/MyDrive/lit_runs/run3
+dtype: bf16
+lora: {r: 64, alpha: 64, dropout: 0.0, encoder_from_layer: 16, decoder: true}
+lr: 1.0e-4
+warmup_steps: 50
+batch_size: 12
+grad_accum: 4            # effective batch 48
+max_steps: 1000
+epoch_samples: 14400
+eval_steps: 250
+save_steps: 250
+keep_best: 3
+eval_batch_size: 32
+val: {holdout_turn: 120, holdout_window: 60}
+num_workers: auto
+gradient_checkpointing: auto
+ema_decay: 0.999         # with warm-up: decay_t = min(0.999, (1+t)/(10+t))
+select: {dev: 0.7, holdout_turn: 0.3}

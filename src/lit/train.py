@@ -8,7 +8,7 @@ What is different from v1 (see the plan / README):
   * Data mix: single-speaker turns + long two-speaker conversation windows + empty-target noise clips (+ optionally
     dev speakers), re-weighted so the Spanish/English share matches the dev/test voice notes.
   * GPU-side augmentation (lit.gpu_aug): level normalisation, denoise, EQ tilt, light noise/reverb; no CPU ffmpeg.
-  * EMA weights are what we validate and export; selection uses macro(Miami hold-out, dev) - never dev alone.
+  * EMA weights (with warm-up) are what we validate and export; selection is dev-weighted (cfg `select`), Miami hold-out is the guard.
   * Resumable (state every `save_steps`), time-boxed (`max_train_minutes`), logs to `experiments.jsonl`.
 """
 
@@ -56,6 +56,8 @@ DEFAULTS = dict(
     sampler=dict(kind_share=dict(turn=0.35, window=0.60, nonspeech=0.015), dev_share=0.08, match_dev_language=True),
     dev_in_train="none",  # none | spk1 | spk2 | all   (spk1: train on dev speaker 1, validate on speaker 2 ...)
     ema_decay=0.999,
+    select=dict(dev=0.7, holdout_turn=0.3),  # weights of the checkpoint-selection score
+    init_adapter="",  # path to an adapter_weights.pt: warm start (weights only; fresh optimiser/schedule/EMA), e.g. stage-2 fine-tune
     max_train_minutes=0, num_workers="auto",
     gradient_checkpointing="auto",  # True | False | "auto" (off, switch on if the GPU runs out of memory)
     cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_variant=0.9, p_codec=0.3),  # speed, codec-bank pick, online Opus->MP3 chain (no bank)
@@ -180,14 +182,22 @@ def cosine_lr(step, total, warmup, lr, min_lr):
 
 
 class EMA:
+    """Exponential moving average with warm-up: decay_t = min(decay, (1+t)/(10+t)). Without it the shadow (initialised
+    at the LoRA init, B=0) keeps decay**steps of the untrained weights: 0.999**1000 = 37% of the exported model."""
+
     def __init__(self, params, decay):
-        self.decay = decay
+        self.decay, self.n = decay, 0
         self.shadow = [p.detach().clone().float() for p in params]
+
+    def current_decay(self):
+        return min(self.decay, (1 + self.n) / (10 + self.n))
 
     @torch.no_grad()
     def update(self, params):
+        self.n += 1
+        d = self.current_decay()
         for s, p in zip(self.shadow, params):
-            s.mul_(self.decay).add_(p.detach().float(), alpha=1 - self.decay)
+            s.mul_(d).add_(p.detach().float(), alpha=1 - d)
 
     @torch.no_grad()
     def swap_in(self, params):
@@ -227,10 +237,11 @@ def run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype):
     return out
 
 
-def selection_score(res: dict) -> float:
-    """Macro average of the multi-speaker Miami hold-out (turns) and the dev voice notes."""
-    keys = [k for k in ("holdout_turn", "dev") if k in res]
-    return float(np.mean([res[k] for k in keys])) if keys else float("nan")
+def selection_score(res: dict, weights: dict | None = None) -> float:
+    """Weighted average of the Miami hold-out (turns) and the dev voice notes (the test is dev-like, so dev leads)."""
+    w = weights or DEFAULTS["select"]
+    keys = [k for k in w if k in res]
+    return float(sum(w[k] * res[k] for k in keys) / sum(w[k] for k in keys)) if keys else float("nan")
 
 
 # --------------------------------------------------------------------------------------- main
@@ -263,6 +274,11 @@ def main(argv=None):
     lc = cfg["lora"]
     model = get_peft_model(model, LoraConfig(r=lc["r"], lora_alpha=lc["alpha"], lora_dropout=lc["dropout"],
                                              target_modules=lora_target_regex(cfg, n_enc), bias="none"))
+    if cfg["init_adapter"]:
+        sd0 = torch.load(cfg["init_adapter"], map_location="cpu")
+        miss = model.load_state_dict(sd0, strict=False)
+        assert not miss.unexpected_keys, f"init_adapter does not match this LoRA layout: {miss.unexpected_keys[:3]}"
+        print(f"[train] warm start from {cfg['init_adapter']} ({len(sd0)} tensors)")
     model.print_trainable_parameters()
     n_lora = sum(1 for n, _ in model.named_modules() if n.endswith("lora_A"))
     print(f"[train] LoRA modules: {n_lora} (encoder layers >= {lc.get('encoder_from_layer', 0)}, decoder={lc.get('decoder', True)})")
@@ -288,8 +304,10 @@ def main(argv=None):
     dit = cfg["dev_in_train"]
     dev_train = [] if dit == "none" else [r for r in dev_rows if dit == "all" or str(r.get("speaker")) == dit[-1]]
     dev_eval = dev_rows if dit in ("none", "all") else [r for r in dev_rows if r not in dev_train]
+    sel_w = cfg["select"]
     if dit == "all":
-        print("[train] WARNING: dev is in the training set; 'dev' WER is contaminated, use the hold-out")
+        print("[train] WARNING: dev is in the training set; 'dev' WER is contaminated, selecting on the hold-out only")
+        sel_w = {"holdout_turn": 1.0}
     dev_train = [dict(r, kind="dev") for r in dev_train]
     train_rows = [r for r in train_rows if r["duration"] <= cfg["max_clip_seconds"]] + dev_train
     val_rng = random.Random(1)
@@ -332,6 +350,8 @@ def main(argv=None):
         if ema and st.get("ema"):
             ema.shadow = [t.to(device) for t in st["ema"]]
         step, epoch, batches_done, best = st["step"], st["epoch"], st["batches_done"], st["best"]
+        if ema:
+            ema.n = step
         print(f"[train] RESUMED at step {step} (epoch {epoch}, best={best[:1]})")
 
     t_start = time.time()
@@ -398,7 +418,7 @@ def main(argv=None):
                 if ema:
                     ema.swap_in(params)
                 res = run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype)
-                score = selection_score(res)
+                score = selection_score(res, sel_w)
                 d = out / f"ckpt_step{step}"
                 d.mkdir(exist_ok=True)
                 torch.save(adapter_state(model), d / "adapter_weights.pt")  # EMA weights (what we select/export)
@@ -435,7 +455,7 @@ def main(argv=None):
     for name, sd in final.items():
         model.load_state_dict(sd, strict=False)
         res = run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype)
-        scores[name] = dict(score=selection_score(res), **res)
+        scores[name] = dict(score=selection_score(res, sel_w), **res)
         print(f"[final] {name}: " + " | ".join(f"{k} {v:.4f}" for k, v in scores[name].items()))
     winner = min(scores, key=lambda k: scores[k]["score"])
     model.load_state_dict(final[winner], strict=False)

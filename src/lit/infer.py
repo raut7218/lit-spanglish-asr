@@ -33,6 +33,7 @@ DEFAULT_CFG = dict(
     repetition_penalty=1.0,
     no_repeat_ngram_size=0,
     max_new_tokens_per_s=8.0,
+    extra={},  # extra faster-whisper transcribe() kwargs, e.g. {"length_penalty": 1.2, "patience": 2.0, "initial_prompt": "..."}
     rules=[],  # names from lit.rules.RULES applied after normalisation
     time_budget_s=6000,  # degrade to greedy if the projected total exceeds this
 )
@@ -123,6 +124,7 @@ class Transcriber:
             no_speech_threshold=c["no_speech_threshold"], log_prob_threshold=c["log_prob_threshold"],
             compression_ratio_threshold=c["compression_ratio_threshold"],
             max_new_tokens=int(min(440, max(48, c["max_new_tokens_per_s"] * min(dur_s, 30) + 24))),
+            **c.get("extra", {}),
         )
 
     def transcribe_array(self, audio: np.ndarray) -> str:

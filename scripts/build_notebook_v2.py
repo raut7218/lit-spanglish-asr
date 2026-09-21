@@ -87,11 +87,11 @@ find = lambda pat: next(iter(sorted(glob.glob(str(src / "**" / pat), recursive=T
 miami_tar, dev_tar = find("*miami*.tar.gz"), find("*enspa_dev*.tar.gz")
 assert miami_tar and dev_tar, f"put the two archives under {src}"
 cache = DRIVE / DRIVE_RUNS / "prepared_v2_full.tar"
+RAW.mkdir(exist_ok=True)   # needed for the dev archive even when the prepared cache is used
 if not (PREP / "train.jsonl").exists():
     if cache.exists():
         sh(f"mkdir -p {PREP} && tar xf {cache} -C {PREP}")
     else:
-        RAW.mkdir(exist_ok=True)
         if not (RAW / "miami").exists(): sh(f"tar xzf {miami_tar} -C {RAW}")
 if not (RAW / "enspa_dev").exists(): sh(f"tar xzf {dev_tar} -C {RAW}")
 if not (PREP / "train.jsonl").exists():
