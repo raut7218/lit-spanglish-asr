@@ -147,6 +147,8 @@ def golden(nemo_path: Path, out: Path, clips: list[str]):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from lit.audio import load_audio
 
+    torch.backends.cuda.matmul.allow_tf32 = False  # true fp32 reference (cuDNN convs default to TF32 otherwise)
+    torch.backends.cudnn.allow_tf32 = False
     m = ASRModel.restore_from(str(nemo_path), map_location="cuda" if torch.cuda.is_available() else "cpu").eval().float()
     dev = next(m.parameters()).device
     rec = dict(clips=[str(c) for c in clips], features=[], encoder=[], text={})

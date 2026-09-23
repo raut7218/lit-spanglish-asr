@@ -8,7 +8,7 @@ The same module is used for training (lit.train), evaluation and the offline run
 train/inference drift. Weights come from `scripts/convert_canary.py` (a .nemo -> model dir with config.json,
 model.safetensors, tokenizer.model). Prompt (Canary-2 format) + our extra style token:
 
-    <|startofcontext|><|startoftranscript|><|emo:undefined|><|src|><|tgt|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>[<|verbatim|>]
+    ▁<|startofcontext|><|startoftranscript|><|emo:undefined|><|src|><|tgt|><|pnc|><|noitn|><|notimestamp|><|nodiarize|>[<|verbatim|>]
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ class Tokenizer:
         return i
 
     def prompt(self, src: str = "es", tgt: str | None = None, pnc: bool = True) -> list[int]:
-        pieces = ["<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>", f"<|{src}|>", f"<|{tgt or src}|>",
+        # NeMo's Canary-2 formatter emits a bare "▁" (the empty decoder-context slot) first; G0 caught its absence
+        pieces = ["▁", "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>", f"<|{src}|>", f"<|{tgt or src}|>",
                   "<|pnc|>" if pnc else "<|nopnc|>", "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>"]
         if self.verbatim:
             pieces.append(self.verbatim)

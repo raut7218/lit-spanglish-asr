@@ -139,7 +139,7 @@ def test_save_load_roundtrip(model_tok, spm_path, tmp_path):
 def test_tokenizer_prompt_and_decode(spm_path):
     tok = canary.Tokenizer(spm_path)
     p = tok.prompt("es", pnc=True)
-    assert [tok.sp.id_to_piece(i) for i in p][:5] == ["<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>", "<|es|>", "<|es|>"]
+    assert [tok.sp.id_to_piece(i) for i in p][:6] == ["▁", "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>", "<|es|>", "<|es|>"]
     assert tok.decode(p + tok.encode("hola que tal") + [tok.eos]) == "hola que tal"
     with pytest.raises(KeyError):
         tok.id("<|xx|>")

@@ -17,7 +17,7 @@ Metric: WER after the organisers' normaliser (`score.py`). Train on Google Colab
 | Augmentation | GPU: level norm, denoise, EQ tilt, noise, reverb; CPU: speed, Opus→MP3 codec chain; SpecAugment | Miami = belt mics, test = WhatsApp voice notes |
 | Inference | batched beam search (beam 4, KV cache), clips > 40 s split at quiet points, loop guard, convention rules, time-budget fallback | offline, torch only |
 
-Prompt: `<|startofcontext|><|startoftranscript|><|emo:undefined|><|es|><|es|><|pnc|><|noitn|><|notimestamp|><|nodiarize|><|verbatim|>`
+Prompt: `▁<|startofcontext|><|startoftranscript|><|emo:undefined|><|es|><|es|><|pnc|><|noitn|><|notimestamp|><|nodiarize|><|verbatim|>`
 
 Column name: the platform CSV column is **`transcript`** (not `transcription`).
 
