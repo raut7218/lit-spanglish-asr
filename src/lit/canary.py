@@ -269,6 +269,11 @@ def load(model_dir, device="cpu", dtype=torch.float32):
     if missing or unexpected:
         raise RuntimeError(f"checkpoint mismatch: missing={missing[:8]} unexpected={unexpected[:8]}")
     model.to(device=device, dtype=dtype)
+    if torch.cuda.is_available():
+        # every padded batch length is a new cuFFT plan (frontend STFT, GPU aug); the default 4096-plan cache holds GPU
+        # memory outside the caching allocator and crashed training with CUFFT_INTERNAL_ERROR near the memory limit
+        for i in range(torch.cuda.device_count()):
+            torch.backends.cuda.cufft_plan_cache[i].max_size = 64
     model.mel_fb.data = model.mel_fb.data.float()  # the frontend always runs in fp32
     model.window.data = model.window.data.float()
     tok = Tokenizer(model_dir / "tokenizer.model", cfg.get("verbatim_token"))
