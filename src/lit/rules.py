@@ -32,6 +32,10 @@ def ah_to_uh(t: str) -> str:
     return re.sub(r"\bah\b", "uh", t)
 
 
+def ok_to_okay(t: str) -> str:
+    return re.sub(r"\bok\b", "okay", t)
+
+
 def drop_ah(t: str) -> str:
     return re.sub(r"\bah\b", " ", t)
 
@@ -48,6 +52,7 @@ RULES = {
     "expand_gonna": expand_gonna,
     "capital_i": capital_i,
     "ah_to_uh": ah_to_uh,
+    "ok_to_okay": ok_to_okay,
     "drop_ah": drop_ah,
     "drop_um": drop_um,
     "drop_hmm": drop_hmm,
