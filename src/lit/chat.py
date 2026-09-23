@@ -54,14 +54,17 @@ def style_text(s: str) -> str:
     return s if s.strip(" .?!") else ""
 
 
-def clean_chat_text(raw: str, collect=None) -> tuple[str, bool, int, int]:
+def clean_chat_text(raw: str, collect=None, matrix: str = "eng") -> tuple[str, bool, int, int]:
     """CHAT main-tier text -> plain verbatim words.
 
     Returns (text, has_unintelligible, n_spanish_tokens, n_english_tokens).
     Retraced / repeated material is KEPT (it was actually spoken); only markup is dropped.
     """
     s = TIME_RE.sub(" ", raw)
-    spa_default = "[- spa]" in s  # untagged words are Spanish in these utterances
+    # untagged words are in the utterance's language: `[- spa]` / `[- eng]` override the file's matrix language
+    # (@Languages first entry: 15 of the 56 Miami files are Spanish-matrix, where untagged words are Spanish)
+    m = re.search(r"\[-\s*([a-z]+)\]", s)
+    spa_default = (m.group(1) if m else matrix).startswith("spa")
     s = re.sub(r"\[-\s*[a-z]+\]", " ", s)
     unintelligible = bool(re.search(r"\b(xxx|yyy|www)\b", s))
     s = re.sub(r"\b(xxx|yyy|www)\b", " ", s)
@@ -116,6 +119,8 @@ def parse_cha(path: Path, collect=None) -> list[Utt]:
                 tier_lines[-1] += " " + line.strip()
         elif line.startswith("%") or line.startswith("@"):
             tier_lines.append(None)  # break continuation
+    langs = next((l.split("	", 1)[1] for l in raw_lines if l.startswith("@Languages:") and "	" in l), "eng")
+    matrix = langs.replace(",", " ").split()[0] if langs.strip() else "eng"
     utts = []
     for line in tier_lines:
         if not line or not line.startswith("*"):
@@ -128,7 +133,7 @@ def parse_cha(path: Path, collect=None) -> list[Utt]:
         start, end = int(marks[-1][0]), int(marks[-1][1])
         if end <= start:
             continue
-        text, unint, n_spa, n_eng = clean_chat_text(body, collect)
+        text, unint, n_spa, n_eng = clean_chat_text(body, collect, matrix)
         utts.append(Utt(speaker, body, text, start, end, n_spa, n_eng, unint))
     return utts
 

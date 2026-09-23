@@ -39,3 +39,11 @@ def test_styled_targets_and_fragments():
     t, *_ = clean_chat_text("I think &e +... es@s:spa &nes que &um it's &=laughs fine ? yeah . ")
     assert t == "I think e... es nes... que um it's fine? Yeah."
     assert clean_chat_text("xxx .")[0] == ""
+
+
+def test_spanish_matrix_file(tmp_path):
+    p = tmp_path / "h.cha"
+    p.write_text("@Languages:\tspa, eng\n*ASH:\tme dice que trabaja en furniture@s:eng . \x151_5369\x15\n"
+                 "*JAC:\t[- eng] yeah I know . \x156000_7000\x15\n", encoding="utf-8")
+    u = parse_cha(p)
+    assert (u[0].n_spa, u[0].n_eng) == (5, 1) and (u[1].n_spa, u[1].n_eng) == (0, 3)

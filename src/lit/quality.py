@@ -70,7 +70,8 @@ def main(argv=None):
     ap.add_argument("--data_dir", required=True)
     ap.add_argument("--splits", nargs="+", default=["train", "miami_holdout", "dev"])
     ap.add_argument("--model", default="openai/whisper-large-v3-turbo", help="zero-shot label check; 'none' to skip")
-    ap.add_argument("--language", default="en")
+    ap.add_argument("--language", default="es,en", help="comma list: decode with each token, keep the best WER per clip "
+                    "(one token alone mostly measures translation: the en token translates Spanish clips)")
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--max_clips", type=int, default=0, help="per split, for a quick look")
@@ -83,8 +84,14 @@ def main(argv=None):
         rs = read_manifest(root / f"{s}.jsonl")
         rs = rs[: a.max_clips] if a.max_clips else rs
         rows += [dict(r, split=s) for r in rs]
+    prev = {}
+    if (root / "quality.jsonl").exists():  # VAD stats do not depend on the model: reuse them
+        prev = {d["id"]: d for d in read_manifest(root / "quality.jsonl")}
+    todo = [r for r in rows if r["id"] not in prev]
     with ProcessPoolExecutor(a.workers) as ex:
-        stats = dict(ex.map(_job, [(root, r) for r in rows], chunksize=32))
+        stats = dict(ex.map(_job, [(root, r) for r in todo], chunksize=32))
+    vad_keys = ("speech_ratio", "lead_s", "trail_s", "speech_db", "snr_db")
+    stats.update({i: {k: d[k] for k in vad_keys} for i, d in prev.items()})
     out = []
     for r in rows:
         out.append(dict(id=r["id"], split=r["split"], kind=r.get("kind", r["split"]), duration=r["duration"],
@@ -99,18 +106,22 @@ def main(argv=None):
         from .postprocess import postprocess
 
         dev = torch.device("cuda")
-        fe, tok = WhisperFeatureExtractor.from_pretrained(a.model), load_tokenizer(a.model, a.language)
+        fe = WhisperFeatureExtractor.from_pretrained(a.model)
         model = load_base(a.model, torch.bfloat16, dev)
         speech = [i for i, r in enumerate(rows) if r.get("text", "").strip()]
         order = sorted(speech, key=lambda i: -rows[i]["duration"])  # length-sorted batches: little padding waste
         for s in range(0, len(order), 2048):
             idx = order[s : s + 2048]
-            hyps = transcribe_hf(model, tok, fe, load_clip_arrays([rows[i] for i in idx], root), dev, a.language,
-                                 a.batch_size, 1, amp_dtype=torch.bfloat16)
-            for i, h in zip(idx, hyps):
-                ref, hyp = norm(out[i]["text"]), postprocess(h)
-                out[i].update(zs_hyp=hyp, zs_wer=round(min(2.0, wer([ref], [hyp])), 3),
-                              len_ratio=round(len(hyp.split()) / max(1, len(ref.split())), 2))
+            audios = load_clip_arrays([rows[i] for i in idx], root)
+            for lang in a.language.split(","):
+                hyps = transcribe_hf(model, load_tokenizer(a.model, lang), fe, audios, dev, lang, a.batch_size, 1,
+                                     amp_dtype=torch.bfloat16)
+                for i, h in zip(idx, hyps):
+                    ref, hyp = norm(out[i]["text"]), postprocess(h)
+                    w = round(min(2.0, wer([ref], [hyp])), 3)
+                    if w < out[i].get("zs_wer", 9):
+                        out[i].update(zs_hyp=hyp, zs_wer=w, zs_lang=lang,
+                                      len_ratio=round(len(hyp.split()) / max(1, len(ref.split())), 2))
             print(f"[quality] zero-shot {min(s + 2048, len(order))}/{len(order)}", flush=True)
 
     with open(root / "quality.jsonl", "w", encoding="utf-8") as f:
