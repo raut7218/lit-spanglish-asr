@@ -5,7 +5,7 @@ set -euo pipefail
 MIAMI=${1:?miami dir}; DEV=${2:?dev dir}; WORK=${3:-/tmp/lit_smoke}
 PY=${PYTHON:-python}
 export PYTHONPATH="$(cd "$(dirname "$0")/.." && pwd)/src"
-CFG="--config configs/smoke.yaml --set data_dir=$WORK/prepared out_dir=$WORK/run"
+CFG="--config configs/smoke_v2.yaml --set data_dir=$WORK/prepared out_dir=$WORK/run"
 
 rm -rf "$WORK"; mkdir -p "$WORK"
 echo "=== 1/7 prepare data (3 conversations)"; $PY -m lit.prepare_data --miami_dir "$MIAMI" --dev_dir "$DEV" --out_dir "$WORK/prepared" --max_convs 3 --holdout_hours 0.05
