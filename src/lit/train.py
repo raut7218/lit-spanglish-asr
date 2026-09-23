@@ -181,9 +181,11 @@ class EMA:
         self.shadow = [p.detach().clone().float() for p in params]
 
     @torch.no_grad()
-    def update(self, params):
+    def update(self, params, step: int):
+        # warmup: a flat 0.9995 kept ~29% of the *base* weights in the EMA after 2500 steps (0.9995**2500)
+        d = min(self.decay, (1 + step) / (10 + step))
         for s, p in zip(self.shadow, params):
-            s.mul_(self.decay).add_(p.detach().float(), alpha=1 - self.decay)
+            s.mul_(d).add_(p.detach().float(), alpha=1 - d)
 
     @torch.no_grad()
     def swap_in(self, params):
@@ -385,7 +387,7 @@ def main(argv=None):
                 gr["lr"] = lr * gr["base_lr"] / cfg["lr"]
             scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True)
             if ema:
-                ema.update(params)
+                ema.update(params, step)
             step += 1
             if step % 10 == 0 or step == 1:
                 el = (time.time() - t_start) / 60
