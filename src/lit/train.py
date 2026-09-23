@@ -60,6 +60,7 @@ DEFAULTS = dict(
     gradient_checkpointing="auto",  # True | False | "auto" (off, switch on if the GPU runs out of memory)
     cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_variant=0.9, p_codec=0.3),  # speed, codec-bank pick, online Opus->MP3 chain (no bank)
     gpu_aug=dict(), spec_augment=True, seed=13, max_clip_seconds=29.5,
+    quality=dict(max_zs_wer=0.0, min_snr_db=-99.0, max_len_ratio=0.0),  # lit.quality filters; 0 / -99 = off
 )
 
 SPA_BINS = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0001]
@@ -156,6 +157,31 @@ def sampling_weights(rows, dev_rows, cfg):
     return w / w.sum()
 
 
+def quality_filter(rows, path, q):
+    """Drop training clips whose label the zero-shot model cannot find in the audio (CHAT timing slips), or that are
+    too noisy. Thresholds come from lit.quality's audit; non-speech clips and clips without a quality row are kept."""
+    if not path.exists() or not (q["max_zs_wer"] or q["max_len_ratio"] or q["min_snr_db"] > -99):
+        return rows
+    qual = {}
+    with open(path, encoding="utf-8") as f:
+        for l in f:
+            d = json.loads(l)
+            qual[d["id"]] = d
+
+    def bad(r):
+        d = qual.get(r["id"])
+        if d is None or r.get("nonspeech"):
+            return False
+        lr = d.get("len_ratio", 1.0)
+        return ((q["max_zs_wer"] and d.get("zs_wer", 0) > q["max_zs_wer"]) or d["snr_db"] < q["min_snr_db"]
+                or (q["max_len_ratio"] and not 1 / q["max_len_ratio"] <= lr <= q["max_len_ratio"]))
+
+    kept = [r for r in rows if not bad(r)]
+    print(f"[train] quality filter {q}: kept {len(kept)}/{len(rows)} clips "
+          f"({sum(r['duration'] for r in kept)/3600:.1f} of {sum(r['duration'] for r in rows)/3600:.1f} h)")
+    return kept
+
+
 # --------------------------------------------------------------------------------------- model helpers
 def lora_target_regex(cfg, n_enc: int):
     lc = cfg["lora"]
@@ -185,9 +211,12 @@ class EMA:
         self.shadow = [p.detach().clone().float() for p in params]
 
     @torch.no_grad()
-    def update(self, params):
+    def update(self, params, step: int):
+        # warmup: a flat 0.999 kept 0.999**1000 = 37% of the zero-init LoRA in the EMA after 1000 steps (run2's
+        # evals at 250-750 steps were mostly the base model)
+        d = min(self.decay, (1 + step) / (10 + step))
         for s, p in zip(self.shadow, params):
-            s.mul_(self.decay).add_(p.detach().float(), alpha=1 - self.decay)
+            s.mul_(d).add_(p.detach().float(), alpha=1 - d)
 
     @torch.no_grad()
     def swap_in(self, params):
@@ -291,7 +320,8 @@ def main(argv=None):
     if dit == "all":
         print("[train] WARNING: dev is in the training set; 'dev' WER is contaminated, use the hold-out")
     dev_train = [dict(r, kind="dev") for r in dev_train]
-    train_rows = [r for r in train_rows if r["duration"] <= cfg["max_clip_seconds"]] + dev_train
+    train_rows = [r for r in train_rows if r["duration"] <= cfg["max_clip_seconds"]]
+    train_rows = quality_filter(train_rows, root / "quality.jsonl", cfg["quality"]) + dev_train
     val_rng = random.Random(1)
     turns = [r for r in hold_rows if r.get("kind", "turn") == "turn"]
     wins = [r for r in hold_rows if r.get("kind") == "window"]
@@ -383,7 +413,7 @@ def main(argv=None):
                 gr["lr"] = lr
             scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True)
             if ema:
-                ema.update(params)
+                ema.update(params, step)
             step += 1
             if step % 10 == 0 or step == 1:
                 el = (time.time() - t_start) / 60
