@@ -1,7 +1,7 @@
 """Competition entrypoint: `uv run src/main.py` inside the offline runtime.
 
 Reads /code_execution/data/test_metadata.csv (+ clips/), transcribes every clip independently with
-the bundled fine-tuned Whisper (CTranslate2), writes /code_execution/submission/submission.csv with
+the bundled fine-tuned Canary (lit.canary, plain torch, no NeMo), writes /code_execution/submission/submission.csv with
 exactly the columns `audio_filename,transcript`.
 
 Logging is deliberately sparse and never prints clip names or transcripts (competition rule: no
@@ -82,7 +82,7 @@ def main() -> None:
 
     lex_path = MODEL_DIR / "casing_lexicon.json"
     lexicon = load_lexicon(lex_path) if lex_path.exists() and os.environ.get("LIT_NO_CASING") != "1" else None
-    t = Transcriber(MODEL_DIR / "ct2", load_cfg(MODEL_DIR), lexicon)
+    t = Transcriber(MODEL_DIR, load_cfg(MODEL_DIR), lexicon)
     print(f"[main] model loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
 
     texts = transcribe_many(t, [DATA_DIR / "clips" / n for n in names])

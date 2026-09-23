@@ -48,7 +48,7 @@ def main():
         names = z.namelist()
         check("main.py" in names, "main.py is at the archive root (not nested in a folder)")
         check(not any(n.startswith("submission/") for n in names), "zip does not contain a submission/ dir")
-        weights = [n for n in names if n.endswith("model.bin")]
+        weights = [n for n in names if n.endswith("model.safetensors")]
         check(bool(weights), f"model weights bundled ({', '.join(weights)})")
         src_main = z.read("main.py").decode()
         check("/code_execution/data" in src_main and "/code_execution/submission/submission.csv" in src_main,

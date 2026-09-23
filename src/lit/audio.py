@@ -34,7 +34,7 @@ def load_audio(path, sr: int = SR, start: float | None = None, dur: float | None
 def split_long(audio: np.ndarray, max_s: float = 29.0, sr: int = SR, search_s: float = 8.0):
     """Split a long clip into <=max_s chunks, cutting at the quietest 0.3 s window near the end.
 
-    Used only for HF-generate evaluation of >30 s clips; the runtime path uses VAD chunking.
+    Used for every clip longer than the model window (training eval, runtime).
     """
     max_n = int(max_s * sr)
     if len(audio) <= max_n:
@@ -53,3 +53,16 @@ def split_long(audio: np.ndarray, max_s: float = 29.0, sr: int = SR, search_s: f
         pos = cut
     chunks.append(audio[pos:])
     return chunks
+
+
+def read_manifest(path):
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(l) for l in f if l.strip()]
+
+
+def load_clip_arrays(rows, root):
+    from pathlib import Path
+
+    return [load_audio(Path(root) / r["audio"]) for r in rows]

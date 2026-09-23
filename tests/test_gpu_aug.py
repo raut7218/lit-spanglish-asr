@@ -58,7 +58,7 @@ def test_normalize_level_db():
 
 
 def test_spec_augment_vectorised_masks_stay_in_clip():
-    from lit.features import spec_augment
+    from lit.gpu_aug import spec_augment
 
     f = torch.ones(3, 80, 3000)
     out = spec_augment(f.clone(), [3000, 1500, 400])

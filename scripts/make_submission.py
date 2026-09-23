@@ -12,29 +12,29 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "rules.py", "infer.py"]
+LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "rules.py", "infer.py", "canary.py", "audio.py"]
+MODEL_FILES = ["config.json", "model.safetensors", "tokenizer.model"]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--export", required=True, help="dir produced by lit.export (has ct2/ + casing_lexicon.json)")
+    ap.add_argument("--export", required=True, help="final_model dir from lit.train (config.json, model.safetensors, tokenizer.model)")
     ap.add_argument("--out", default="submission.zip")
     ap.add_argument("--cfg", default="{}", help="JSON overrides for infer_config.json (language, beam_size, ...)")
     ap.add_argument("--cfg_file", help="JSON file with the overrides (wins over --cfg)")
-    ap.add_argument("--lexicon", action="store_true", help="ship casing_lexicon.json (off by default: it hurt dev WER)")
     a = ap.parse_args()
 
     exp = Path(a.export)
-    assert (exp / "ct2" / "model.bin").exists(), f"{exp}/ct2/model.bin missing - run lit.export first"
+    missing = [f for f in MODEL_FILES if not (exp / f).exists()]
+    assert not missing, f"{exp} lacks {missing} - point --export at lit.train's final_model dir"
     stage = Path(tempfile.mkdtemp())
     shutil.copy(ROOT / "submission_src" / "main.py", stage / "main.py")
     (stage / "lit").mkdir()
     for f in LIT_FILES:
         shutil.copy(ROOT / "src" / "lit" / f, stage / "lit" / f)
     (stage / "model").mkdir()
-    shutil.copytree(exp / "ct2", stage / "model" / "ct2")
-    if a.lexicon and (exp / "casing_lexicon.json").exists():
-        shutil.copy(exp / "casing_lexicon.json", stage / "model" / "casing_lexicon.json")
+    for f in MODEL_FILES:
+        shutil.copy(exp / f, stage / "model" / f)
     (stage / "model" / "infer_config.json").write_text(json.dumps(json.loads(Path(a.cfg_file).read_text()) if a.cfg_file else json.loads(a.cfg), indent=2))
 
     out = Path(a.out).resolve()
@@ -46,7 +46,7 @@ def main():
         for p in sorted(stage.rglob("*")):
             if p.is_file():
                 rel = p.relative_to(stage).as_posix()
-                z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix == ".bin" else zipfile.ZIP_DEFLATED)
+                z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix == ".safetensors" else zipfile.ZIP_DEFLATED)
     shutil.rmtree(stage)
     if out.exists():
         out.unlink()

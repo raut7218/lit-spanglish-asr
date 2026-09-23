@@ -3,59 +3,60 @@
 Spanish–English code-switching ASR for the **Lost in Transcription** competition (Mozilla Data Collective / DrivenData).
 Metric: WER after the organisers' normaliser (`score.py`). Train on Google Colab, run offline in the competition runtime.
 
-## Architecture (and why it differs from the planning doc)
+## Architecture: Canary-1b-v2, fine-tuned, run without NeMo
 
 | Decision | Choice | Evidence |
 |---|---|---|
-| Base model | **Whisper large-v3-turbo** (T4) / **large-v3** (A100) | Runtime pins `transformers 4.57.6`, has **no NeMo** → Canary-1b-v2 cannot load there. Runtime *does* ship `faster-whisper 1.2.1` + `ctranslate2 4.8.2` (`runtime/uv.lock`). |
-| Fine-tuning | LoRA r=32 on all attention + MLP projections (encoder **and** decoder), fp16/bf16 base frozen, gradient checkpointing | fits a 16 GB T4; encoder LoRA adapts to phone-mic/codec audio |
-| Targets | Miami CHAT → verbatim words, **scorer-normalised** (`lit.normalize` = verbatim copy of `score.py`) | scorer lowercases only sentence-initial letters, so casing is learned from data |
-| Prompt | fixed `<|es|><|transcribe|><|notimestamps|>` | test is mixed; `en` is compared on dev (`LANGUAGE` in the notebook) |
-| Augmentation | Opus/MP3/AMR-NB round-trips (ffmpeg), coloured + babble noise, synthetic reverb, band-limit, speed, clipping, SpecAugment | Miami = belt mics, test = WhatsApp voice notes |
-| Validation | 35-min official dev set (honest) + speaker-disjoint Miami hold-out | dev never trained on until the optional last step |
-| Inference | merge LoRA → CTranslate2 → `faster-whisper` `BatchedInferencePipeline`; ≤29.5 s clips decoded whole, longer ones VAD-chunked; loop/hallucination guard; data-driven casing fix | offline, no torch needed at inference |
+| Base model | **nvidia/canary-1b-v2** (FastConformer 32L encoder + 8L Transformer decoder, 978M, CC-BY-4.0) | 1.7M h incl. es/en + 36k h non-speech; stronger multilingual base than Whisper; 8-layer decoder = cheap decoding |
+| Runtime port | `src/lit/canary.py`: transformers' `ParakeetEncoder` (= NeMo FastConformer) + our decoder, NeMo's own filterbank | runtime has `torch` + `transformers<5` (4.57.x ships `ParakeetEncoder`) but **no NeMo**; design borrowed from bodhan-ai/indic-transcribe-flex (Canary as safetensors + plain modelling code) |
+| Conversion | `scripts/convert_canary.py`: `.nemo` tar → `config.json` + `model.safetensors` + `tokenizer.model`, strict key accounting | no NeMo needed; NeMo only for the golden parity reference (gate G0) |
+| Fine-tuning | full fine-tune, encoder layers 0–15 + subsampling frozen, encoder 16–31 at 3e-5, decoder at 1e-4, bf16 autocast, EMA, BatchNorm frozen | deeper adaptation than LoRA; fits an A100 40 GB |
+| Verbatim | new prompt token `<\|verbatim\|>` (a spare `<\|spltokenN\|>` slot, initialised from `<\|pnc\|>`) | the indic-transcribe-flex idea (task tokens pick the output style): verbatim disfluencies become a mode instead of fighting Canary's clean pre-training |
+| Language | per-clip `<\|es\|>`/`<\|en\|>` from the clip's Spanish share; inference decodes with both prompts, keeps the higher length-normalised log-prob | code-switched test, no language label |
+| Targets | Miami CHAT → verbatim words, dev/test spelling conventions (`conventions.json`), scorer-normalised (`lit.normalize` = copy of `score.py`) | |
+| Augmentation | GPU: level norm, denoise, EQ tilt, noise, reverb; CPU: speed, Opus→MP3 codec chain; SpecAugment | Miami = belt mics, test = WhatsApp voice notes |
+| Inference | batched beam search (beam 4, KV cache), clips > 40 s split at quiet points, loop guard, convention rules, time-budget fallback | offline, torch only |
+
+Prompt: `<|startofcontext|><|startoftranscript|><|emo:undefined|><|es|><|es|><|pnc|><|noitn|><|notimestamp|><|nodiarize|><|verbatim|>`
 
 Column name: the platform CSV column is **`transcript`** (not `transcription`).
 
+## Gates (stop early if the model swap does not pay off)
+| Gate | Check | Where |
+|---|---|---|
+| G0 | port == NeMo: features / encoder states (rel. err < 1e-3), identical greedy transcripts | `tests/test_canary_parity.py`, notebook |
+| G1 | zero-shot dev WER per prompt (Whisper large-v3 zero-shot: 0.51 es / 0.43 en) | notebook |
+| G2 | fine-tuned dev WER **< 0.0875** (old shipped Whisper system) | notebook |
+| G3 | leaderboard **< 0.1181** (old system), target < 0.10 | platform |
+
 ## Layout
 ```
-src/lit/  normalize.py chat.py prepare_data.py augment.py features.py model_utils.py train.py evaluate.py
-          export.py infer.py casing.py postprocess.py
+src/lit/  canary.py (model, frontend, beam search, tokenizer)  train.py  evaluate.py  infer.py (runtime)
+          normalize.py chat.py prepare_data.py conventions.* rules.py postprocess.py casing.py
+          augment.py gpu_aug.py audio.py analyze.py
 submission_src/main.py         # runtime entrypoint (copied to zip root by make_submission.py)
-scripts/  make_submission.py run_submission_local.py smoke_local.sh build_notebook.py official_score.py
-configs/  smoke.yaml colab_t4.yaml colab_a100.yaml
-notebooks/colab_pipeline.ipynb # the end-to-end pipeline for Colab
-tests/
+scripts/  convert_canary.py build_notebook.py make_submission.py run_submission_local.py rule_search.py official_score.py ...
+configs/  canary_a100.yaml smoke_canary.yaml
+notebooks/colab_pipeline.ipynb # end-to-end Colab pipeline (generated by scripts/build_notebook.py)
+tests/    test_canary.py (tiny random model) test_train_e2e.py (train -> resume -> export -> runtime) test_canary_parity.py (G0)
 ```
 
-## Run on Colab
+## Run on Colab (A100)
 1. Upload `*miami.tar.gz` and `*enspa_dev.tar.gz` to `Drive/lit_data/`.
-2. Open `notebooks/colab_pipeline.ipynb` in Colab (GPU runtime), set `REPO_URL`, run with `SMOKE=True`, then `SMOKE=False`.
-3. Upload the resulting `submission.zip` on the competition page (do a platform smoke test first).
+2. Open `notebooks/colab_pipeline.ipynb`, run all: tests → data → convert → G0 → G1 → train → G2 + rules → zip → validation.
+3. Final model: re-run training with `DEV_IN_TRAIN = "all"`, a new `RUN_NAME` and the winning step count, rebuild the zip.
+4. Upload `submission.zip` (platform smoke test first).
 
-## Local smoke test (tiny model, any machine with ffmpeg)
+## Local tests (CPU, no downloads)
 ```
 pip install -e '.[dev]'
-scripts/smoke_local.sh /path/to/miami /path/to/enspa_dev
+pytest -q tests          # includes a tiny end-to-end train -> resume -> export -> runtime-inference run
 ```
 
 ## Rules respected
 Only organiser-provided data for training; no competition audio/text is sent to any hosted API; data and weights are git-ignored.
 
-## Results so far (dev = the 35-min official set, never trained on; scorer-exact WER)
-
-| System | Dev WER |
-|---|---|
-| Whisper large-v3 zero-shot, `es` token / `en` token, greedy | 0.509 / 0.430 |
-| + LoRA fine-tune on Bangor Miami (500 steps, greedy) | 0.1051 |
-| + convention rules (`gonna`->`going to`, capital `I`, `ah`->`uh`, drop `um`), greedy | 0.0919 |
-| **Shipped zip: CTranslate2 fp16, beam 5, rules, no casing lexicon (155 clips, 0.52 s/clip on A100)** | **0.0875** |
-
-Caveats: dev is only 155 clips (~+-0.01); the 4 rules and the checkpoint were chosen while looking at dev. Speaker-disjoint Miami hold-out WER was 0.128-0.143 (different transcription conventions).
-Error analysis (`python -m lit.analyze`) showed the remaining gap is mostly convention mismatch: Miami writes "gonna" (820x) / "ah" (603x), dev writes "going to" / never "ah".
-
-## Speed notes (A100 40 GB)
-Training loop: gradient checkpointing off with automatic OOM fallback, 10 dataloader workers, TF32, fused AdamW -> 3.6 s/step (was 6.2 s). GPU utilisation is ~45-70%: the remaining bottleneck is Python/launch overhead in the LoRA-wrapped model, not data.
-
-## Next ideas
-Fix conventions in the training targets (gonna->going to, ah) and retrain; finish the cosine schedule (steps 500-1107); language token `en` check on the fine-tuned model; final retrain including dev only after model selection.
+## History: the Whisper system (replaced, still the score to beat)
+Whisper large-v3 + LoRA → CTranslate2 (see git history before the Canary switch). Dev 0.0875, **public LB 0.1181**.
+The ~0.03 dev→test gap is test acoustics + conventions, which is why the dev-in-train final fit and test-style
+augmentation matter as much as the base model.

@@ -1,0 +1,25 @@
+# Canary-1b-v2 full fine-tune, Colab A100 40 GB (bf16 autocast, fp32 master weights).
+# Encoder layers 0-15 + subsampling frozen; encoder 16-31 at lr_encoder, decoder at lr. EMA weights are validated/exported.
+model: /content/canary_base          # scripts/convert_canary.py --out /content/canary_base
+languages: [es, en]                  # decode with both prompts, keep the higher-scoring hypothesis
+verbatim: true
+data_dir: /content/data_prepared
+out_dir: /content/drive/MyDrive/lit_runs/canary1
+dtype: bf16
+freeze_encoder_below: 16
+lr: 1.0e-4
+lr_encoder: 3.0e-5
+warmup_steps: 200
+batch_size: 12
+grad_accum: 4            # effective batch 48
+max_steps: 2500
+epoch_samples: 14400
+eval_steps: 250
+save_steps: 250
+keep_best: 2             # each checkpoint is ~1.2 GB (fp16 trainable weights)
+eval_batch_size: 16
+eval_beams: 1
+val: {holdout_turn: 120, holdout_window: 60}
+num_workers: auto
+gradient_checkpointing: auto
+ema_decay: 0.9995

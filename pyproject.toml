@@ -1,11 +1,11 @@
 [project]
 name = "lit-spanglish-asr"
 version = "0.1.0"
-description = "Whisper LoRA fine-tuning + faster-whisper inference for Lost in Transcription (Spanish-English)"
+description = "Canary-1b-v2 fine-tuning + NeMo-free inference for Lost in Transcription (Spanish-English)"
 requires-python = ">=3.10"
 dependencies = [
-  "torch", "torchaudio", "transformers==4.57.6", "peft==0.20.0", "faster-whisper==1.2.1", "ctranslate2==4.8.2",
-  "accelerate", "jiwer", "soundfile", "librosa", "numpy", "pandas", "pyyaml", "tqdm", "sentencepiece", "typer",
+  "torch", "torchaudio", "transformers==4.57.6", "safetensors", "sentencepiece", "huggingface_hub",
+  "jiwer", "soundfile", "librosa", "numpy", "pandas", "pyyaml", "typer",  # typer: scripts/official_score.py
 ]
 
 [project.optional-dependencies]

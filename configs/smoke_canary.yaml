@@ -1,0 +1,20 @@
+# CPU smoke test of the Canary training loop with a tiny random model (tests/test_train_e2e.py builds it).
+languages: [es, en]
+verbatim: true
+dtype: fp32
+freeze_encoder_below: 1
+lr: 5.0e-4
+lr_encoder: 5.0e-4
+warmup_steps: 2
+batch_size: 2
+grad_accum: 1
+max_steps: 4
+epoch_samples: 16
+eval_steps: 2
+save_steps: 2
+keep_best: 2
+eval_batch_size: 4
+val: {holdout_turn: 4, holdout_window: 3}
+num_workers: 0
+gradient_checkpointing: false
+cpu_aug: {p_speed: 0.4, speeds: [0.9, 1.0, 1.1], p_variant: 0.9, p_codec: 0.0}

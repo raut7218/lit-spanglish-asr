@@ -1,10 +1,12 @@
-"""LoRA fine-tuning of Whisper for Spanglish voice notes (v2: robust + fast).
+"""Full fine-tuning of Canary-1b-v2 (lit.canary, NeMo-free) for Spanglish voice notes.
 
-    python -m lit.train --config configs/colab_a100_v2.yaml [--set key=value ...]
+    python -m lit.train --config configs/canary_a100.yaml [--set key=value ...]
 
-What is different from v1 (see the plan / README):
-  * LoRA only where it matters: encoder layers >= `lora.encoder_from_layer` + all decoder layers; the frozen lower
-    encoder needs no gradients or stored activations -> ~30% less compute, room for a bigger batch, no checkpointing.
+  * `model` is a dir made by scripts/convert_canary.py. Encoder layers < `freeze_encoder_below` (and the conv
+    subsampling) are frozen: no gradients, no stored activations. Everything above trains, encoder at `lr_encoder`,
+    decoder at `lr`. BatchNorm statistics stay frozen (lit.canary.CanaryModel.train).
+  * Prompt per clip: language token from the clip's Spanish share (es/en) + the `<|verbatim|>` style token, so the
+    model learns verbatim transcription (disfluencies, repetitions) as a mode separate from its clean pre-training.
   * Data mix: single-speaker turns + long two-speaker conversation windows + empty-target noise clips (+ optionally
     dev speakers), re-weighted so the Spanish/English share matches the dev/test voice notes.
   * GPU-side augmentation (lit.gpu_aug): level normalisation, denoise, EQ tilt, light noise/reverb; no CPU ffmpeg.
@@ -26,36 +28,31 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, Dataset
-from transformers import WhisperFeatureExtractor
 
-from .audio import load_audio
+from . import canary
+from .audio import load_audio, load_clip_arrays, read_manifest
 from .augment import codec_chain
-from .features import LogMel, pad_batch, spec_augment
-from .gpu_aug import GpuAugConfig, GpuAugmenter, normalize_level_db
-from .model_utils import (encode_targets, load_base, load_clip_arrays, load_tokenizer, pick_dtype, read_manifest,
-                          transcribe_hf)
+from .gpu_aug import GpuAugConfig, GpuAugmenter, normalize_level_db, spec_augment
 from .normalize import wer
 from .postprocess import postprocess
 
 DEFAULTS = dict(
-    model="openai/whisper-large-v3",
-    language="es",
+    model="/content/canary_base",  # scripts/convert_canary.py output
+    languages=["es", "en"],  # eval/inference prompts; the best-scoring hypothesis wins
+    verbatim=True,  # append the <|verbatim|> style token to every prompt
     data_dir="/content/data_prepared",
-    out_dir="/content/drive/MyDrive/lit_runs/run2",
-    dtype="auto",  # bf16 if supported, else fp16
-    lora=dict(r=64, alpha=64, dropout=0.0, targets=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"],
-              encoder_from_layer=16, decoder=True),
-    lr=1e-4, min_lr=1e-6, warmup_steps=50, weight_decay=1e-3, grad_clip=1.0, label_smoothing=0.1,
-    batch_size=8, grad_accum=4, epochs=0, max_steps=1200, epoch_samples=12800,
+    out_dir="/content/drive/MyDrive/lit_runs/canary1",
+    dtype="auto",  # autocast dtype: bf16 if supported, else fp16 (master weights stay fp32)
+    freeze_encoder_below=16,
+    lr=1e-4, lr_encoder=3e-5, min_lr=1e-6, warmup_steps=200, weight_decay=1e-3, grad_clip=1.0, label_smoothing=0.1,
+    batch_size=8, grad_accum=4, epochs=0, max_steps=2500, epoch_samples=12800,
     eval_steps=200, save_steps=200, keep_best=3, eval_batch_size=32, eval_beams=1,
     val=dict(holdout_turn=120, holdout_window=60),
     sampler=dict(kind_share=dict(turn=0.35, window=0.60, nonspeech=0.015), dev_share=0.08, match_dev_language=True),
     dev_in_train="none",  # none | spk1 | spk2 | all   (spk1: train on dev speaker 1, validate on speaker 2 ...)
-    ema_decay=0.999,
+    ema_decay=0.9995,
     max_train_minutes=0, num_workers="auto",
     gradient_checkpointing="auto",  # True | False | "auto" (off, switch on if the GPU runs out of memory)
     cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_variant=0.9, p_codec=0.3),  # speed, codec-bank pick, online Opus->MP3 chain (no bank)
@@ -80,7 +77,7 @@ def load_config(path, overrides=()):
     for o in overrides:
         k, v = o.split("=", 1)
         d = cfg
-        *parts, last = k.split(".")  # dotted keys reach nested dicts: lora.r=64
+        *parts, last = k.split(".")  # dotted keys reach nested dicts: val.holdout_turn=60
         for part in parts:
             d = d[part]
         d[last] = yaml.safe_load(v)
@@ -111,11 +108,25 @@ class ClipDataset(Dataset):
         audio = audio[: int(self.cfg["max_clip_seconds"] * 16000)]
         if self.train and not r.get("variants") and rng.random() < ca.get("p_codec", 0.0) and not r.get("nonspeech"):
             audio = codec_chain(audio, rng)  # test clips are MP3-64k re-encodes of Opus voice notes
-        dec_in, labels = encode_targets(self.tok, r["text"])
+        dec_in, labels = encode_targets(self.tok, r["text"], clip_language(r))
         return audio, dec_in, labels, bool(r.get("nonspeech"))
 
 
-def collate(batch, pad_id=50257):
+def clip_language(r) -> str:
+    """Prompt language of a training clip: its dominant language (Canary's src/tgt token); dev/unknown -> es."""
+    f = r.get("spa_frac")
+    return "en" if f is not None and f < 0.5 else "es"
+
+
+def encode_targets(tok, text: str, lang: str, max_len: int = 440):
+    """prompt + text + eos -> (decoder input, labels); the prompt positions are not scored."""
+    prompt = tok.prompt(lang)
+    ids = (prompt + tok.encode(text))[: max_len - 1] + [tok.eos]
+    labels = [-100] * (len(prompt) - 1) + ids[len(prompt):]
+    return ids[:-1], labels
+
+
+def collate(batch, pad_id=2):
     audios, dec_ins, labels, ns = zip(*batch)
     L = max(len(x) for x in dec_ins)
     di = torch.full((len(batch), L), pad_id, dtype=torch.long)
@@ -123,8 +134,8 @@ def collate(batch, pad_id=50257):
     for i, (d, l) in enumerate(zip(dec_ins, labels)):
         di[i, : len(d)] = torch.tensor(d)
         lb[i, : len(l)] = torch.tensor(l)
-    lens = torch.tensor([len(a) for a in audios], dtype=torch.long)
-    return pad_batch(list(audios)), di, lb, lens, torch.tensor(ns)
+    wav, lens = canary.pad_waves(list(audios))
+    return wav, di, lb, lens, torch.tensor(ns)
 
 
 def spa_bin(x):
@@ -157,21 +168,6 @@ def sampling_weights(rows, dev_rows, cfg):
 
 
 # --------------------------------------------------------------------------------------- model helpers
-def lora_target_regex(cfg, n_enc: int):
-    lc = cfg["lora"]
-    if lc.get("encoder_from_layer", 0) <= 0 and lc.get("decoder", True):
-        return lc["targets"]
-    attn = [t for t in lc["targets"] if t.endswith("_proj")]
-    mlp = [t for t in lc["targets"] if t in ("fc1", "fc2")]
-    parts = []
-    enc = "|".join(str(i) for i in range(lc.get("encoder_from_layer", 0), n_enc))
-    if enc:
-        parts.append(rf"model\.encoder\.layers\.({enc})\.(self_attn\.({'|'.join(attn)})|{'|'.join(mlp)})")
-    if lc.get("decoder", True):
-        parts.append(rf"model\.decoder\.layers\.\d+\.((self_attn|encoder_attn)\.({'|'.join(attn)})|{'|'.join(mlp)})")
-    return "|".join(parts)
-
-
 def cosine_lr(step, total, warmup, lr, min_lr):
     if step < warmup:
         return lr * (step + 1) / warmup
@@ -202,11 +198,19 @@ class EMA:
         self._backup = None
 
 
-def adapter_state(model):
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items() if "lora_" in k}
+def trainable_state(model, dtype=None):
+    """Only the trained tensors (the frozen part never changes): what checkpoints and resume need."""
+    names = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {k: v.detach().to("cpu", dtype=dtype or v.dtype).clone() for k, v in model.state_dict().items() if k in names}
 
 
-def average_adapters(states):
+def load_partial(model, sd):
+    unknown = set(sd) - set(model.state_dict())
+    assert not unknown, f"unknown keys {sorted(unknown)[:5]}"
+    model.load_state_dict(sd, strict=False)
+
+
+def average_states(states):
     return {k: sum(s[k].float() for s in states) / len(states) for k in states[0]}
 
 
@@ -215,14 +219,14 @@ def log_experiment(cfg, record):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype):
+def run_eval(model, tok, sets, root, cfg, amp_dtype):
     """{name: rows} -> {name: WER} on the shipped-style text (loops collapsed, scorer normalised)."""
     out = {}
     for name, rows in sets.items():
         if not rows:
             continue
-        hyps = transcribe_hf(model, tok, fe, load_clip_arrays(rows, root), device, cfg["language"], cfg["eval_batch_size"],
-                             cfg["eval_beams"], amp_dtype=amp_dtype)
+        hyps = canary.transcribe(model, tok, load_clip_arrays(rows, root), cfg["languages"], cfg["eval_beams"],
+                                 cfg["eval_batch_size"], amp_dtype=amp_dtype)
         out[name] = wer([r.get("ref", r["text"]) for r in rows], [postprocess(h) for h in hyps])
     return out
 
@@ -251,32 +255,29 @@ def main(argv=None):
     torch.backends.cudnn.benchmark = True
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = pick_dtype(cfg["dtype"]) if device.type == "cuda" else torch.float32
+    dtype = canary.pick_dtype(cfg["dtype"]) if device.type == "cuda" else torch.float32
     use_scaler = device.type == "cuda" and dtype == torch.float16
     amp_dtype = dtype if device.type == "cuda" else None
-    print(f"[train] device={device} dtype={dtype} model={cfg['model']}")
+    print(f"[train] device={device} autocast={dtype} model={cfg['model']}")
 
-    fe = WhisperFeatureExtractor.from_pretrained(cfg["model"])
-    tok = load_tokenizer(cfg["model"], cfg["language"])
-    model = load_base(cfg["model"], dtype, device)
-    n_enc = model.config.encoder_layers
-    lc = cfg["lora"]
-    model = get_peft_model(model, LoraConfig(r=lc["r"], lora_alpha=lc["alpha"], lora_dropout=lc["dropout"],
-                                             target_modules=lora_target_regex(cfg, n_enc), bias="none"))
-    model.print_trainable_parameters()
-    n_lora = sum(1 for n, _ in model.named_modules() if n.endswith("lora_A"))
-    print(f"[train] LoRA modules: {n_lora} (encoder layers >= {lc.get('encoder_from_layer', 0)}, decoder={lc.get('decoder', True)})")
+    model, tok = canary.load(cfg["model"], device, torch.float32)  # fp32 master weights, bf16/fp16 autocast
+    if not cfg["verbatim"]:
+        tok.verbatim = model.cfg["verbatim_token"] = None
+    model.freeze_encoder_below(cfg["freeze_encoder_below"])
+    n_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_all = sum(p.numel() for p in model.parameters())
+    print(f"[train] trainable {n_tr/1e6:.0f}M / {n_all/1e6:.0f}M (encoder layers >= {cfg['freeze_encoder_below']} + decoder), "
+          f"verbatim token={tok.verbatim}")
 
     gc_on = {"v": False}
 
     def enable_gc():
-        model.base_model.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        model.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         gc_on["v"] = True
-        print("[train] gradient checkpointing ON", flush=True)
+        print("[train] gradient checkpointing ON (encoder)", flush=True)
 
     if cfg["gradient_checkpointing"] is True:
         enable_gc()
-    mel = LogMel(fe, device)
     gpu_aug = GpuAugmenter(GpuAugConfig(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg["gpu_aug"].items()}))
 
     # ---- data
@@ -309,23 +310,27 @@ def main(argv=None):
         cfg["num_workers"] = max(2, min(10, (os.cpu_count() or 4) - 2))
     print(f"[train] dataloader workers={cfg['num_workers']}")
     ds = ClipDataset(train_rows, root, tok, cfg, train=True)
-    pad_id = tok.eos_token_id
+    pad_id = tok.pad
     bs = cfg["batch_size"]
     steps_per_epoch = max(1, cfg["epoch_samples"] // (bs * cfg["grad_accum"]))
     total_steps = cfg["max_steps"] or steps_per_epoch * max(1, cfg["epochs"])
     print(f"[train] sampler epoch={steps_per_epoch} steps, total_steps={total_steps}, effective batch={bs * cfg['grad_accum']}")
 
     params = [p for p in model.parameters() if p.requires_grad]
+    enc_ids = {id(p) for p in model.encoder.parameters()}
+    groups = [dict(params=[p for p in params if id(p) in enc_ids], base_lr=cfg["lr_encoder"]),
+              dict(params=[p for p in params if id(p) not in enc_ids], base_lr=cfg["lr"])]
     ema = EMA(params, cfg["ema_decay"]) if cfg["ema_decay"] > 0 else None
-    opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=cfg["weight_decay"], betas=(0.9, 0.98), fused=device.type == "cuda")
+    opt = torch.optim.AdamW([g for g in groups if g["params"]], lr=cfg["lr"], weight_decay=cfg["weight_decay"],
+                            betas=(0.9, 0.98), fused=device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # ---- resume
     step, epoch, batches_done, best = 0, 0, 0, []
     state_path = out / "train_state.pt"
-    if state_path.exists() and (out / "last_adapter").exists():
+    if state_path.exists() and (out / "last" / "weights.pt").exists():
         st = torch.load(state_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(torch.load(out / "last_adapter" / "adapter_weights.pt", map_location="cpu"), strict=False)
+        load_partial(model, torch.load(out / "last" / "weights.pt", map_location="cpu"))
         opt.load_state_dict(st["opt"])
         if use_scaler and st.get("scaler"):
             scaler.load_state_dict(st["scaler"])
@@ -351,23 +356,20 @@ def main(argv=None):
             if is_ns.any():  # real silence/noise clips are quiet: undo the loudness normalisation for them
                 m = is_ns.to(device)
                 wav[m] = normalize_level_db(wav[m], lens[m], -30.0 - 20.0 * torch.rand(int(m.sum()), device=device))
-            feats = mel(wav)
+            feats, fmask = model.features(wav, lens)
             if cfg["spec_augment"]:
-                feats = spec_augment(feats, (lens // 160).tolist())
-            feats = feats.to(dtype)
+                feats = spec_augment(feats.transpose(1, 2), fmask.sum(1).tolist()).transpose(1, 2)
             dec_in, labels = dec_in.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             for attempt in range(2):
                 try:
                     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                        logits = model(input_features=feats, decoder_input_ids=dec_in).logits
-                    loss = F.cross_entropy(logits.float().reshape(-1, logits.size(-1)), labels.reshape(-1), ignore_index=-100,
-                                           label_smoothing=cfg["label_smoothing"])
+                        loss = model(feats, fmask, dec_in, labels, cfg["label_smoothing"])
                     scaler.scale(loss / cfg["grad_accum"]).backward()
                     break
                 except torch.cuda.OutOfMemoryError:
                     if gc_on["v"] or attempt == 1:
                         raise
-                    logits = loss = None
+                    loss = None
                     opt.zero_grad(set_to_none=True)  # drop the partial accumulation window; restart it with this batch
                     micro -= micro % cfg["grad_accum"]
                     torch.cuda.empty_cache()
@@ -380,7 +382,7 @@ def main(argv=None):
             gn = torch.nn.utils.clip_grad_norm_(params, cfg["grad_clip"])
             lr = cosine_lr(step, total_steps, cfg["warmup_steps"], cfg["lr"], cfg["min_lr"])
             for gr in opt.param_groups:
-                gr["lr"] = lr
+                gr["lr"] = lr * gr["base_lr"] / cfg["lr"]
             scaler.step(opt); scaler.update(); opt.zero_grad(set_to_none=True)
             if ema:
                 ema.update(params)
@@ -397,11 +399,11 @@ def main(argv=None):
                 model.eval()
                 if ema:
                     ema.swap_in(params)
-                res = run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype)
+                res = run_eval(model, tok, sets, root, cfg, amp_dtype)
                 score = selection_score(res)
                 d = out / f"ckpt_step{step}"
                 d.mkdir(exist_ok=True)
-                torch.save(adapter_state(model), d / "adapter_weights.pt")  # EMA weights (what we select/export)
+                torch.save(trainable_state(model, torch.float16), d / "weights.pt")  # EMA weights (what we select/export)
                 if ema:
                     ema.restore(params)
                 model.train()
@@ -413,8 +415,8 @@ def main(argv=None):
                     shutil.rmtree(out / name, ignore_errors=True)
                 best = best[: cfg["keep_best"]]
             if do_save:
-                (out / "last_adapter").mkdir(exist_ok=True)
-                torch.save(adapter_state(model), out / "last_adapter" / "adapter_weights.pt")
+                (out / "last").mkdir(exist_ok=True)
+                torch.save(trainable_state(model), out / "last" / "weights.pt")
                 torch.save(dict(opt=opt.state_dict(), scaler=scaler.state_dict() if use_scaler else None, step=step,
                                 epoch=epoch, batches_done=batches_done, best=best,
                                 ema=[t.cpu() for t in ema.shadow] if ema else None), state_path)
@@ -426,24 +428,24 @@ def main(argv=None):
             batches_done = 0
 
     # ---- finalise: best single EMA checkpoint vs average of the best K; keep the winner on the selection score
-    states = [torch.load(out / n / "adapter_weights.pt", map_location="cpu") for _, _, n in best if (out / n).exists()]
-    final = {"single": states[0]} if states else {"single": adapter_state(model)}
+    states = [torch.load(out / n / "weights.pt", map_location="cpu") for _, _, n in best if (out / n).exists()]
+    final = {"single": states[0]} if states else {"single": trainable_state(model)}
     if len(states) > 1:
-        final["avg"] = average_adapters(states)
+        final["avg"] = average_states(states)
     scores = {}
     model.eval()
     for name, sd in final.items():
-        model.load_state_dict(sd, strict=False)
-        res = run_eval(model, tok, fe, sets, root, cfg, device, amp_dtype)
+        load_partial(model, sd)
+        res = run_eval(model, tok, sets, root, cfg, amp_dtype)
         scores[name] = dict(score=selection_score(res), **res)
         print(f"[final] {name}: " + " | ".join(f"{k} {v:.4f}" for k, v in scores[name].items()))
     winner = min(scores, key=lambda k: scores[k]["score"])
-    model.load_state_dict(final[winner], strict=False)
-    dest = out / "final_adapter"
-    model.save_pretrained(dest)
+    load_partial(model, final[winner])
+    dest = out / "final_model"
+    canary.save(model, dest, tokenizer_path=Path(cfg["model"]) / "tokenizer.model", dtype=torch.float16)
     (dest / "final.json").write_text(json.dumps(dict(winner=winner, scores=scores, steps=step, cfg=cfg), indent=2))
     log_experiment(cfg, dict(final=True, winner=winner, scores=scores, steps=step, ts=time.time()))
-    print(f"[final] saved {winner} adapter -> {dest} (score {scores[winner]['score']:.4f})")
+    print(f"[final] saved {winner} model -> {dest} (score {scores[winner]['score']:.4f})")
 
 
 if __name__ == "__main__":
