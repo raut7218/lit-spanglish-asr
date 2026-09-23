@@ -20,10 +20,14 @@ from .casing import build_lexicon, save_lexicon
 from .model_utils import read_manifest
 
 
-def merge_and_save(model_name, adapter, hf_dir):
+def merge_and_save(model_name, adapter, hf_dir, adapter_weights=None):
     model = WhisperForConditionalGeneration.from_pretrained(model_name, torch_dtype=torch.float32)
     if adapter:
-        model = PeftModel.from_pretrained(model, adapter).merge_and_unload()
+        model = PeftModel.from_pretrained(model, adapter)
+        if adapter_weights:  # a training checkpoint (ckpt_stepN/adapter_weights.pt) in the same LoRA layout
+            res = model.load_state_dict(torch.load(adapter_weights, map_location="cpu"), strict=False)
+            assert not res.unexpected_keys, res.unexpected_keys[:3]
+        model = model.merge_and_unload()
     model.config.use_cache = True
     model.save_pretrained(hf_dir, safe_serialization=True)
     WhisperFeatureExtractor.from_pretrained(model_name).save_pretrained(hf_dir)
@@ -42,6 +46,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--adapter")
+    ap.add_argument("--adapter_weights", help="ckpt_stepN/adapter_weights.pt to use instead of --adapter's weights")
     ap.add_argument("--data_dir", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--quantization", default="float16")
@@ -50,7 +55,7 @@ def main(argv=None):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     hf_dir = out / "hf_merged"
-    merge_and_save(a.model, a.adapter, hf_dir)
+    merge_and_save(a.model, a.adapter, hf_dir, a.adapter_weights)
     convert_ct2(hf_dir, out / "ct2", a.quantization)
     root = Path(a.data_dir)
     texts = [r["text"] for r in read_manifest(root / "train.jsonl")]
