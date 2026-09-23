@@ -1,0 +1,23 @@
+# v3 recipe, Colab A100 40 GB, Whisper large-v3-turbo (4-layer decoder: ~3x faster decoding than large-v3, so the
+# runtime budget allows beam search + multi-system MBR). LoRA on the upper encoder + all decoder layers.
+model: openai/whisper-large-v3-turbo
+language: es
+data_dir: /content/data_v3
+out_dir: /content/drive/MyDrive/lit_runs/turbo1
+dtype: bf16
+lora: {r: 64, alpha: 64, dropout: 0.0, encoder_from_layer: 16, decoder: true}
+lr: 1.0e-4
+warmup_steps: 50
+batch_size: 16
+grad_accum: 3            # effective batch 48
+max_steps: 800
+epoch_samples: 14400
+eval_steps: 200
+save_steps: 200
+keep_best: 2
+eval_batch_size: 64
+val: {holdout_turn: 200, holdout_window: 60}
+num_workers: auto
+gradient_checkpointing: auto
+ema_decay: 0.999         # with warm-up
+quality: {max_zs_wer: 0.8, min_snr_db: -99, max_len_ratio: 0}
