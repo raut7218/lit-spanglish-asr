@@ -22,6 +22,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from lit.casing import load_lexicon  # noqa: E402
 from lit.infer import Transcriber, load_cfg, transcribe_many  # noqa: E402
+from lit.mbr import mbr_pick  # noqa: E402
 from lit.postprocess import PLACEHOLDER, finalize_transcript  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("LIT_DATA_DIR", "/code_execution/data"))
@@ -82,10 +83,14 @@ def main() -> None:
 
     lex_path = MODEL_DIR / "casing_lexicon.json"
     lexicon = load_lexicon(lex_path) if lex_path.exists() and os.environ.get("LIT_NO_CASING") != "1" else None
-    t = Transcriber(MODEL_DIR / "ct2", load_cfg(MODEL_DIR), lexicon)
-    print(f"[main] model loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
-
-    texts = transcribe_many(t, [DATA_DIR / "clips" / n for n in names])
+    cfg = load_cfg(MODEL_DIR)
+    outs = []
+    for s in cfg.get("systems", ["ct2"]):  # several fine-tuned models: per-clip MBR pick (lit.mbr)
+        t = Transcriber(MODEL_DIR / s, cfg, lexicon)
+        print(f"[main] model {len(outs) + 1} loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
+        outs.append(transcribe_many(t, [DATA_DIR / "clips" / n for n in names]))
+        del t
+    texts = outs[0] if len(outs) == 1 else [mbr_pick(list(h)) for h in zip(*outs)]
 
     n_empty = sum(1 for x in texts if not " ".join(str(x or "").split()))
     texts = [finalize_transcript(x) for x in texts]
