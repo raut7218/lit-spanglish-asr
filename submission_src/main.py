@@ -84,8 +84,12 @@ def main() -> None:
     lex_path = MODEL_DIR / "casing_lexicon.json"
     lexicon = load_lexicon(lex_path) if lex_path.exists() and os.environ.get("LIT_NO_CASING") != "1" else None
     cfg = load_cfg(MODEL_DIR)
-    outs = []
-    for s in cfg.get("systems", ["ct2"]):  # several fine-tuned models: per-clip MBR pick (lit.mbr)
+    outs, budget = [], cfg.get("ensemble_budget_s", 4800)
+    for s in cfg.get("systems", ["ct2"]):  # several fine-tuned models: per-clip MBR pick (lit.mbr); strongest first
+        el = time.time() - t0
+        if outs and el * (len(outs) + 1) / len(outs) > budget:  # the next model would not fit: ship what we have
+            print(f"[main] time guard: stopping after {len(outs)} models ({el:.0f}s elapsed)", flush=True)
+            break
         t = Transcriber(MODEL_DIR / s, cfg, lexicon)
         print(f"[main] model {len(outs) + 1} loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
         outs.append(transcribe_many(t, [DATA_DIR / "clips" / n for n in names]))
