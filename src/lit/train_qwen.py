@@ -3,8 +3,9 @@
     python -m lit.train_qwen --config configs/qwen_a100.yaml [--set key=value ...]
 
 Reused from lit.train: quality filter, language-matched sampler, cosine LR, EMA (with warm-up), macro(hold-out, dev)
-selection. Augmentation runs per clip in the dataloader workers (speed, Opus->MP3 codec chain, lit.gpu_aug on CPU)
-because Qwen's processor computes the features on the CPU. Targets: lit.qwen.target_text ("language X<asr_text>...").
+selection. Speed + Opus->MP3 codec chain run per clip in the dataloader workers; lit.gpu_aug runs either there too
+(aug_on_gpu=false) or on the GPU batch, followed by the log-mel on the GPU (lit.features.LogMel == the processor's
+WhisperFeatureExtractor on the longest-padded batch), which keeps the 12 Colab CPUs from starving the A100. Targets: lit.qwen.target_text ("language X<asr_text>...").
 The best (EMA) adapter is merged and saved as a full HF model dir that qwen-asr / vLLM load directly (`merged/`).
 """
 
@@ -26,7 +27,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from .audio import load_audio
 from .augment import codec_chain
-from .gpu_aug import GpuAugConfig, GpuAugmenter
+from .features import LogMel
+from .gpu_aug import GpuAugConfig, GpuAugmenter, normalize_level_db
 from .model_utils import read_manifest
 from .normalize import wer
 from .postprocess import postprocess
@@ -47,7 +49,7 @@ DEFAULTS = dict(
     ema_decay=0.999,
     num_workers="auto", gradient_checkpointing=False,
     cpu_aug=dict(p_speed=0.4, speeds=[0.9, 1.0, 1.1], p_codec=0.3),
-    gpu_aug=dict(), seed=13, max_clip_seconds=29.5,
+    gpu_aug=dict(), aug_on_gpu=True, seed=13, max_clip_seconds=29.5,
     quality=dict(max_zs_wer=0.8, min_snr_db=-99.0, max_len_ratio=0.0),
 )
 HF_FILES = ["config.json", "generation_config.json", "preprocessor_config.json", "processor_config.json",
@@ -98,35 +100,45 @@ class QwenClips(Dataset):
                 n = int(round(len(audio) / f))
                 audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype(np.float32)
         audio = audio[: int(self.cfg["max_clip_seconds"] * 16000)]
-        if not r.get("nonspeech"):
-            if rng.random() < ca["p_codec"]:
-                audio = codec_chain(audio, rng)
-            with torch.no_grad():
-                audio = self.aug(torch.from_numpy(audio)[None], torch.tensor([len(audio)]))[0].numpy()
-        else:  # real silence/noise clips stay quiet (level ~ -30..-50 dB)
-            audio = audio * (10 ** (-rng.uniform(30, 50) / 20) / (np.sqrt(np.mean(audio**2)) + 1e-8))
-        return audio.astype(np.float32), target_text(r)
+        ns = bool(r.get("nonspeech"))
+        if not ns and rng.random() < ca["p_codec"]:
+            audio = codec_chain(audio, rng)
+        if not self.cfg["aug_on_gpu"]:
+            if not ns:
+                with torch.no_grad():
+                    audio = self.aug(torch.from_numpy(audio)[None], torch.tensor([len(audio)]))[0].numpy()
+            else:  # real silence/noise clips stay quiet (level ~ -30..-50 dB)
+                audio = audio * (10 ** (-rng.uniform(30, 50) / 20) / (np.sqrt(np.mean(audio**2)) + 1e-8))
+        return audio.astype(np.float32), target_text(r), ns
 
 
 class Collate:
     """Qwen SFT collation (prefix = chat template up to the assistant turn; loss only on the target + eos)."""
 
-    def __init__(self, processor):
-        self.p = processor
+    def __init__(self, processor, return_wav=False):
+        self.p, self.return_wav = processor, return_wav
         msgs = [{"role": "system", "content": ""}, {"role": "user", "content": [{"type": "audio", "audio": None}]}]
         self.prefix = processor.apply_chat_template([msgs], add_generation_prompt=True, tokenize=False)[0]
         self.eos = processor.tokenizer.eos_token or ""
 
     def __call__(self, batch):
-        audios, targets = zip(*batch)
+        from qwen_asr.core.transformers_backend.processing_qwen3_asr import _get_feat_extract_output_lengths
+
+        audios, targets, ns = zip(*(b if len(b) == 3 else (*b, False) for b in batch))
         full = self.p(text=[self.prefix + t + self.eos for t in targets], audio=list(audios), return_tensors="pt", padding=True)
-        pre = self.p(text=[self.prefix] * len(audios), audio=list(audios), return_tensors="pt", padding=True)
+        n_aud = _get_feat_extract_output_lengths(full["feature_attention_mask"].sum(-1)).tolist()
+        pre_len = [len(x) for x in self.p.tokenizer(self.p.replace_multimodal_special_tokens([self.prefix] * len(audios), iter(n_aud)))["input_ids"]]
         # the processor pads on the LEFT (whatever tokenizer.padding_side says): loss = the real tokens after the prefix
         labels = torch.full_like(full["input_ids"], -100)
-        for i, n in enumerate(pre["attention_mask"].sum(1).tolist()):
+        for i, n in enumerate(pre_len):
             keep = full["attention_mask"][i].nonzero().squeeze(1)[n:]
             labels[i, keep] = full["input_ids"][i, keep]
         full["labels"] = labels
+        if self.return_wav:  # raw audio, zero-padded to the longest clip (the processor's padding), for GPU aug + log-mel
+            L = max(len(a) for a in audios)
+            full["wav"] = torch.from_numpy(np.stack([np.pad(a, (0, L - len(a))) for a in audios]))
+            full["wav_len"] = torch.tensor([len(a) for a in audios])
+            full["ns"] = torch.tensor(ns)
         return full
 
 
@@ -192,7 +204,9 @@ def main(argv=None):
 
     if cfg["num_workers"] == "auto":
         cfg["num_workers"] = max(2, min(10, (os.cpu_count() or 4) - 2))
-    ds, collate = QwenClips(train_rows, root, cfg), Collate(processor)
+    ds, collate = QwenClips(train_rows, root, cfg), Collate(processor, return_wav=cfg["aug_on_gpu"])
+    gaug = GpuAugmenter(GpuAugConfig(**{k: (tuple(v) if isinstance(v, list) else v) for k, v in cfg["gpu_aug"].items()}))
+    mel = LogMel(processor.feature_extractor, device)
     bs, total = cfg["batch_size"], cfg["max_steps"]
     params = [p for p in pm.parameters() if p.requires_grad]
     ema = EMA(params, cfg["ema_decay"]) if cfg["ema_decay"] > 0 else None
@@ -225,6 +239,16 @@ def main(argv=None):
                         collate_fn=collate, pin_memory=cuda, prefetch_factor=4 if cfg["num_workers"] else None)
         acc = []
         for batch in dl:
+            if "wav" in batch:
+                wav, wl, ns = batch.pop("wav").to(device), batch.pop("wav_len").to(device), batch.pop("ns").to(device)
+                with torch.no_grad():
+                    wav = gaug(wav, wl)
+                    if ns.any():  # real silence/noise clips stay quiet
+                        wav[ns] = normalize_level_db(wav[ns], wl[ns], -30.0 - 20.0 * torch.rand(int(ns.sum()), device=device))
+                    wav = wav * (torch.arange(wav.shape[1], device=device)[None] < wl[:, None])
+                    feats = mel(wav)
+                assert feats.shape == batch["input_features"].shape, (feats.shape, batch["input_features"].shape)
+                batch["input_features"] = feats
             batch = {k: (v.to(device, dtype) if v.is_floating_point() else v.to(device)) for k, v in batch.items()}
             with torch.autocast(device_type=device.type, dtype=dtype, enabled=cuda):
                 loss = model.thinker(**batch).loss

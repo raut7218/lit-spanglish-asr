@@ -23,3 +23,23 @@ def test_labels_are_exactly_the_targets():
     for i in range(2):
         got = proc.tokenizer.decode(b["input_ids"][i][b["labels"][i] != -100])
         assert got == tg[i] + proc.tokenizer.eos_token
+
+
+def test_gpu_logmel_matches_processor_features():
+    import torch
+    from qwen_asr.core.transformers_backend.processing_qwen3_asr import Qwen3ASRProcessor
+
+    from lit.features import LogMel
+    from lit.train_qwen import Collate
+
+    try:
+        proc = Qwen3ASRProcessor.from_pretrained(MODEL)
+    except Exception as e:
+        pytest.skip(f"processor unavailable: {e}")
+    rng = np.random.default_rng(0)
+    b = Collate(proc, return_wav=True)([(0.1 * rng.standard_normal(16000 * 3).astype(np.float32), "language None<asr_text>", True),
+                                        (0.1 * rng.standard_normal(16037 * 7).astype(np.float32), "language English<asr_text>hi", False)])
+    feats = LogMel(proc.feature_extractor, "cpu")(b["wav"])
+    assert feats.shape == b["input_features"].shape
+    assert torch.allclose(feats, b["input_features"], atol=1e-4)
+    assert b["ns"].tolist() == [True, False] and b["wav_len"].tolist() == [48000, 16037 * 7]
