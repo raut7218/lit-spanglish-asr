@@ -172,6 +172,8 @@ def main(argv=None):
     cuda = torch.cuda.is_available()
     device = torch.device("cuda" if cuda else "cpu")
     dtype = torch.bfloat16 if cuda else torch.float32
+    if cuda:  # variable batch lengths fill the cuFFT plan cache (gpu_aug / log-mel) until CUFFT_ALLOC_FAILED
+        torch.backends.cuda.cufft_plan_cache.max_size = 16
 
     from qwen_asr import Qwen3ASRModel
 
@@ -225,6 +227,8 @@ def main(argv=None):
         torch.save(adapter_state(pm), d / "adapter_weights.pt")
         if ema:
             ema.restore(params)
+        if cuda:
+            torch.cuda.empty_cache()  # generate()'s cache would otherwise crowd out the training step's FFT workspace
         model.train()
         print(f"[eval] step {step} score {score:.4f} | " + " | ".join(f"{k} {v:.4f}" for k, v in res.items()), flush=True)
         with open(out / "experiments.jsonl", "a") as f:
