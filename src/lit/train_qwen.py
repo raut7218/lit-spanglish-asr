@@ -160,6 +160,8 @@ def main(argv=None):
     ap.add_argument("--config")
     ap.add_argument("--set", nargs="*", default=[])
     ap.add_argument("--dry", action="store_true", help="build everything, run 1 step + eval + merge, exit")
+    ap.add_argument("--finalize", action="store_true", help="no training: pick the best saved ckpts (experiments.jsonl) "
+                    "of an existing out_dir, single vs average, merge (after stopping a run that stopped improving)")
     a = ap.parse_args(argv)
     cfg = load_config(a.config, a.set)
     out = Path(cfg["out_dir"])
@@ -229,8 +231,15 @@ def main(argv=None):
             f.write(json.dumps(dict(step=step, score=score, **res, ts=time.time())) + "\n")
         return score, d.name
 
-    best = [evaluate(0)] if not a.dry else []  # zero-shot baseline on the same sets
-    step, micro, epoch, t0, stop = 0, 0, 0, time.time(), False
+    step, micro, epoch, t0, stop = 0, 0, 0, time.time(), a.finalize
+    if a.finalize:
+        recs = [json.loads(l) for l in open(out / "experiments.jsonl") if l.strip()]
+        best = sorted((r["score"], f"ckpt_step{r['step']}") for r in recs
+                      if r.get("step") and (out / f"ckpt_step{r['step']}").exists())[: cfg["keep_best"]]
+        step = max(int(n[len("ckpt_step"):]) for _, n in best)
+        print(f"[finalize] candidates {best}", flush=True)
+    else:
+        best = [evaluate(0)] if not a.dry else []  # zero-shot baseline on the same sets
     model.train()
     while not stop:
         g = torch.Generator().manual_seed(cfg["seed"] + epoch)
