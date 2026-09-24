@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "rules.py", "infer.py", "mbr.py"]
+LIT_FILES = ["__init__.py", "normalize.py", "casing.py", "postprocess.py", "rules.py", "infer.py", "mbr.py", "qwen.py", "audio.py"]
 
 
 def main():
@@ -24,6 +24,8 @@ def main():
     ap.add_argument("--lexicon", action="store_true", help="ship casing_lexicon.json (off by default: it hurt dev WER)")
     ap.add_argument("--extra", nargs="*", default=[], help="more exports for an MBR ensemble: model/ct2_2, ct2_3, ... "
                     "(infer_config.json gets systems=[ct2, ct2_2, ...])")
+    ap.add_argument("--qwen", nargs="*", default=[], help="merged Qwen3-ASR dirs (lit.train_qwen out/merged): model/qwen, "
+                    "qwen_2, ...; they go FIRST in systems (MBR ties -> first) unless the cfg sets `systems`")
     a = ap.parse_args()
 
     exp = Path(a.export)
@@ -40,10 +42,19 @@ def main():
         assert (Path(e) / "ct2" / "model.bin").exists(), f"{e}/ct2/model.bin missing"
         shutil.copytree(Path(e) / "ct2", stage / "model" / f"ct2_{k}")
         systems.append(f"ct2_{k}")
+    qsys = []
+    for k, q in enumerate(a.qwen, 1):
+        assert (Path(q) / "config.json").exists() and list(Path(q).glob("*.safetensors")), f"{q}: not a merged Qwen dir"
+        name = "qwen" if k == 1 else f"qwen_{k}"
+        shutil.copytree(q, stage / "model" / name)
+        qsys.append(name)
+    systems = qsys + systems
     if a.lexicon and (exp / "casing_lexicon.json").exists():
         shutil.copy(exp / "casing_lexicon.json", stage / "model" / "casing_lexicon.json")
     icfg = json.loads(Path(a.cfg_file).read_text()) if a.cfg_file else json.loads(a.cfg)
-    if len(systems) > 1:
+    if "systems" in icfg:
+        assert set(icfg["systems"]) <= set(systems), f"cfg systems {icfg['systems']} not all shipped ({systems})"
+    elif len(systems) > 1 or qsys:
         icfg["systems"] = systems
     (stage / "model" / "infer_config.json").write_text(json.dumps(icfg, indent=2))
 
@@ -56,7 +67,7 @@ def main():
         for p in sorted(stage.rglob("*")):
             if p.is_file():
                 rel = p.relative_to(stage).as_posix()
-                z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix == ".bin" else zipfile.ZIP_DEFLATED)
+                z.write(p, rel, compress_type=zipfile.ZIP_STORED if p.suffix in (".bin", ".safetensors") else zipfile.ZIP_DEFLATED)
     shutil.rmtree(stage)
     if out.exists():
         out.unlink()

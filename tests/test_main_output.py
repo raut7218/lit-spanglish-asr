@@ -91,3 +91,35 @@ def test_empty_and_na_like_transcripts_never_become_nan(tmp_path, monkeypatch):
     assert norm(df["transcript"][2]) == norm("NA") and norm(df["transcript"][3]) == norm("None")  # scored text unchanged
     assert df["transcript"][5] == "hola, que tal"
     assert "\n" not in "".join(df["transcript"]) and " " not in "".join(df["transcript"])
+
+
+def test_qwen_system_in_mbr_and_failure_fallback(tmp_path, monkeypatch):
+    import json
+
+    data = tmp_path / "data"
+    (data / "clips").mkdir(parents=True)
+    (data / "submission_format.csv").write_text("audio_filename,transcript\na.mp3,x\n")
+    out = tmp_path / "o.csv"
+    m = _load_main(monkeypatch, data, out)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "infer_config.json").write_text(json.dumps({"systems": ["qwen", "ct2", "ct2_2"]}))
+    monkeypatch.setattr(m, "MODEL_DIR", model)
+
+    class FakeT:
+        device = "cpu"
+
+    monkeypatch.setattr(m, "Transcriber", lambda *a, **k: FakeT())
+    whisper = iter([["b c"], ["a b d"]])
+    monkeypatch.setattr(m, "transcribe_many", lambda t, paths: next(whisper))
+    monkeypatch.setattr(m, "run_qwen", lambda d, paths, cfg: ["a b c"])
+    m.main()
+    assert open(out).read().splitlines()[1] == "a.mp3,a b c"  # medoid of {a b c, b c, a b d}
+
+    def boom(*a):
+        raise RuntimeError("vllm died")
+
+    whisper = iter([["b c"], ["b c"]])
+    monkeypatch.setattr(m, "run_qwen", boom)
+    m.main()
+    assert open(out).read().splitlines()[1] == "a.mp3,b c"  # qwen skipped, whisper systems still ship

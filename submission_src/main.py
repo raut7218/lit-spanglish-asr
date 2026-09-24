@@ -76,6 +76,26 @@ def self_check(names) -> int:
     return n_bad
 
 
+def run_qwen(model_dir: Path, paths, cfg: dict) -> list[str]:
+    """Qwen3-ASR via vLLM in a child process (the GPU is fully released when it exits). Its verbose output goes to a
+    file, not our log (500-line cap); only the tail is shown, and only if it fails."""
+    import json
+    import subprocess
+    import tempfile
+
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "clips.txt").write_text("\n".join(str(p) for p in paths), encoding="utf-8")
+    qcfg = {**cfg.get("qwen", {}), "rules": cfg.get("rules", [])}
+    with open(tmp / "qwen.log", "w") as log:
+        rc = subprocess.run([sys.executable, "-m", "lit.qwen", "--model", str(model_dir), "--paths_file", str(tmp / "clips.txt"),
+                             "--out", str(tmp / "hyps.json"), "--cfg", json.dumps(qcfg)], cwd=HERE, stdout=log,
+                            stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONPATH=str(HERE))).returncode
+    if rc:
+        tail = (tmp / "qwen.log").read_text(errors="replace").replace(str(DATA_DIR), "<data>").splitlines()[-15:]
+        raise RuntimeError(f"qwen exit {rc}: " + " | ".join(l[:200] for l in tail))
+    return json.loads((tmp / "hyps.json").read_text(encoding="utf-8"))
+
+
 def main() -> None:
     t0 = time.time()
     names = read_clip_names()
@@ -90,9 +110,17 @@ def main() -> None:
         if outs and el * (len(outs) + 1) / len(outs) > budget:  # the next model would not fit: ship what we have
             print(f"[main] time guard: stopping after {len(outs)} models ({el:.0f}s elapsed)", flush=True)
             break
+        paths = [DATA_DIR / "clips" / n for n in names]
+        if s.startswith("qwen"):
+            try:
+                outs.append(run_qwen(MODEL_DIR / s, paths, cfg))
+                print(f"[main] {s} done at {time.time()-t0:.0f}s", flush=True)
+            except Exception as e:  # never lose the submission to the new system: the Whisper systems still run
+                print(f"[main] !!! {s} failed, skipping it: {str(e)[:250]}", flush=True)
+            continue
         t = Transcriber(MODEL_DIR / s, cfg, lexicon)
         print(f"[main] model {len(outs) + 1} loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
-        outs.append(transcribe_many(t, [DATA_DIR / "clips" / n for n in names]))
+        outs.append(transcribe_many(t, paths))
         del t
     texts = outs[0] if len(outs) == 1 else [mbr_pick(list(h)) for h in zip(*outs)]
 

@@ -1,0 +1,19 @@
+# Qwen3-ASR-1.7B + LoRA (audio encoder layers >= 12 of 24, all LLM layers), Colab A100 40 GB, same prepared data as
+# configs/turbo_a100.yaml. Step 0 = zero-shot baseline on the same val sets (the go/no-go gate for this model).
+model: Qwen/Qwen3-ASR-1.7B
+data_dir: /content/data_v3
+out_dir: /content/drive/MyDrive/lit_runs/qwen1
+lora: {r: 64, alpha: 64, dropout: 0.05, audio_from_layer: 12, text: true}
+lr: 1.0e-4
+warmup_steps: 30
+batch_size: 8
+grad_accum: 6            # effective batch 48 (same as the Whisper runs)
+max_steps: 600
+epoch_samples: 14400
+eval_steps: 100
+keep_best: 2
+eval_batch_size: 48
+val: {holdout_turn: 200, holdout_window: 60}
+num_workers: auto
+ema_decay: 0.999
+quality: {max_zs_wer: 0.8, min_snr_db: -99, max_len_ratio: 0}
