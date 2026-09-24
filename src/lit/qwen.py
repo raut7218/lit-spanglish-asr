@@ -2,7 +2,8 @@
 
 Targets use Qwen's native format "language X<asr_text>text" (X = the clip's majority language; empty clips
 "language None<asr_text>"), so decoding with language=None lets the model pick the prefix per clip and the
-package strips it. Long clips need no VAD: qwen-asr decodes up to 1200 s in one pass.
+package strips it. Clips longer than `max_chunk_s` are cut at the quietest point (lit.audio.split_long) and the pieces
+decoded as one batch: the fine-tuned model has only seen <=30 s and ended one 3.5 min clip after a third of it.
 
 Runtime (vLLM, its own process so the GPU is released before faster-whisper loads):
     python -m lit.qwen --model DIR --paths_file clips.txt --out hyps.json [--cfg '{"rules": [...]}']
@@ -16,12 +17,13 @@ import sys
 import time
 from pathlib import Path
 
+from .audio import split_long
 from .postprocess import postprocess
 
 SR = 16000
 ASR_TAG = "<asr_text>"
 DEFAULT_CFG = dict(language=None, rules=[], max_new_tokens=1024, gpu_memory_utilization=0.85, max_model_len=8192,
-                   batch=128, context="")
+                   batch=128, context="", max_chunk_s=29.0)
 
 
 def target_text(row: dict) -> str:
@@ -54,12 +56,19 @@ def load_vllm(model_dir, cfg: dict):
 
 def transcribe(model, wavs, cfg: dict) -> list[str]:
     """wavs: 16 kHz float32 arrays -> postprocessed (scorer-normalised + rules) hypotheses, order kept."""
-    out = []
-    for i in range(0, len(wavs), cfg["batch"]):
-        chunk = [(w, SR) for w in wavs[i : i + cfg["batch"]]]
-        res = model.transcribe(audio=chunk, context=cfg["context"], language=cfg["language"])
-        out += [r.text for r in res]
-    return [postprocess(t, None, cfg.get("rules")) for t in out]
+    pieces, owner = [], []
+    for k, w in enumerate(wavs):
+        ps = split_long(w, cfg["max_chunk_s"]) if cfg.get("max_chunk_s") else [w]
+        pieces += ps
+        owner += [k] * len(ps)
+    texts = []
+    for i in range(0, len(pieces), cfg["batch"]):
+        chunk = [(w, SR) for w in pieces[i : i + cfg["batch"]]]
+        texts += [r.text for r in model.transcribe(audio=chunk, context=cfg["context"], language=cfg["language"])]
+    out = [[] for _ in wavs]
+    for k, t in zip(owner, texts):
+        out[k].append(t.strip())
+    return [postprocess(" ".join(x for x in t if x), None, cfg.get("rules")) for t in out]
 
 
 def main(argv=None):
