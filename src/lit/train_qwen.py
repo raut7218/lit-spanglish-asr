@@ -121,10 +121,11 @@ class Collate:
         audios, targets = zip(*batch)
         full = self.p(text=[self.prefix + t + self.eos for t in targets], audio=list(audios), return_tensors="pt", padding=True)
         pre = self.p(text=[self.prefix] * len(audios), audio=list(audios), return_tensors="pt", padding=True)
-        labels = full["input_ids"].clone()
+        # the processor pads on the LEFT (whatever tokenizer.padding_side says): loss = the real tokens after the prefix
+        labels = torch.full_like(full["input_ids"], -100)
         for i, n in enumerate(pre["attention_mask"].sum(1).tolist()):
-            labels[i, :n] = -100
-        labels[full["attention_mask"] == 0] = -100
+            keep = full["attention_mask"][i].nonzero().squeeze(1)[n:]
+            labels[i, keep] = full["input_ids"][i, keep]
         full["labels"] = labels
         return full
 
