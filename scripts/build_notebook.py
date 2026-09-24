@@ -28,7 +28,7 @@ warm-up, beam-5 faster-whisper runtime. Resumable from Google Drive.
 
 code('''
 RUN_NAME    = "turbo1"
-BRANCH      = "whisper-v3"
+BRANCH      = "main"
 REPO_URL    = "https://github.com/raut7218/lit-spanglish-asr.git"
 CONFIG      = "configs/turbo_a100.yaml"
 EXTRA_SET   = ""             # e.g. "max_steps=600 dev_in_train=all quality.max_zs_wer=0"

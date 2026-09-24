@@ -1,0 +1,9 @@
+{
+  "language": "es",
+  "beam_size": 5,
+  "compute_type": "int8_float16",
+  "rules": ["capital_i", "ok_to_okay", "ah_to_uh"],
+  "ensemble_budget_s": 4800,
+  "combine": "rover",
+  "systems": ["qwen", "ct2", "ct2_2", "ct2_3"]
+}

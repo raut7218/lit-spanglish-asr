@@ -1,4 +1,4 @@
-"""Error analysis for a predictions CSV written by `lit.evaluate --dump` (columns: id, ref, hyp).
+"""Error analysis for a predictions CSV dumped by `scripts/decode_eval.py` or `scripts/qwen_eval.py --dump_dir` (columns: id, ref, hyp).
 
     python -m lit.analyze preds.csv [--top 25] [--worst 8]
 

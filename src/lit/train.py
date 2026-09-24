@@ -2,7 +2,7 @@
 
     python -m lit.train --config configs/colab_a100_v2.yaml [--set key=value ...]
 
-What is different from v1 (see the plan / README):
+What is different from v1 (see CONTEXT.md):
   * LoRA only where it matters: encoder layers >= `lora.encoder_from_layer` + all decoder layers; the frozen lower
     encoder needs no gradients or stored activations -> ~30% less compute, room for a bigger batch, no checkpointing.
   * Data mix: single-speaker turns + long two-speaker conversation windows + empty-target noise clips (+ optionally

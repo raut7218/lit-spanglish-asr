@@ -1,4 +1,4 @@
-"""Score post-processing rules on prediction dumps (`lit.evaluate --dump`), on SEVERAL sets at once.
+"""Score post-processing rules on prediction dumps (`decode_eval.py` / `qwen_eval.py --dump_dir`), on SEVERAL sets at once.
 
     python scripts/rule_search.py dev_preds.csv holdout_preds.csv [--out chosen_rules.json]
 

@@ -1,7 +1,7 @@
 [project]
 name = "lit-spanglish-asr"
 version = "0.1.0"
-description = "Whisper LoRA fine-tuning + faster-whisper inference for Lost in Transcription (Spanish-English)"
+description = "Qwen3-ASR + Whisper LoRA ensemble (ROVER) for Lost in Transcription (Spanish-English); see CONTEXT.md"
 requires-python = ">=3.10"
 dependencies = [
   "torch", "torchaudio", "transformers==4.57.6", "peft==0.20.0", "faster-whisper==1.2.1", "ctranslate2==4.8.2",
