@@ -22,7 +22,7 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from lit.casing import load_lexicon  # noqa: E402
 from lit.infer import Transcriber, load_cfg, transcribe_many  # noqa: E402
-from lit.mbr import mbr_pick  # noqa: E402
+from lit.mbr import mbr_pick, rover  # noqa: E402
 from lit.postprocess import PLACEHOLDER, finalize_transcript  # noqa: E402
 
 DATA_DIR = Path(os.environ.get("LIT_DATA_DIR", "/code_execution/data"))
@@ -122,7 +122,8 @@ def main() -> None:
         print(f"[main] model {len(outs) + 1} loaded on {t.device} in {time.time()-t0:.0f}s", flush=True)
         outs.append(transcribe_many(t, paths))
         del t
-    texts = outs[0] if len(outs) == 1 else [mbr_pick(list(h)) for h in zip(*outs)]
+    combine = rover if cfg.get("combine") == "rover" else mbr_pick  # rover: word-level vote aligned to the medoid
+    texts = outs[0] if len(outs) == 1 else [combine(list(h)) for h in zip(*outs)]
 
     n_empty = sum(1 for x in texts if not " ".join(str(x or "").split()))
     texts = [finalize_transcript(x) for x in texts]

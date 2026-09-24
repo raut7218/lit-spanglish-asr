@@ -123,3 +123,27 @@ def test_qwen_system_in_mbr_and_failure_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "run_qwen", boom)
     m.main()
     assert open(out).read().splitlines()[1] == "a.mp3,b c"  # qwen skipped, whisper systems still ship
+
+
+def test_rover_combine(tmp_path, monkeypatch):
+    import json
+
+    data = tmp_path / "data"
+    (data / "clips").mkdir(parents=True)
+    (data / "submission_format.csv").write_text("audio_filename,transcript\na.mp3,x\n")
+    out = tmp_path / "o.csv"
+    m = _load_main(monkeypatch, data, out)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "infer_config.json").write_text(json.dumps({"systems": ["qwen", "ct2", "ct2_2"], "combine": "rover"}))
+    monkeypatch.setattr(m, "MODEL_DIR", model)
+
+    class FakeT:
+        device = "cpu"
+
+    monkeypatch.setattr(m, "Transcriber", lambda *a, **k: FakeT())
+    whisper = iter([["a cat sat on the mat"], ["the cat sit on the mat"]])
+    monkeypatch.setattr(m, "transcribe_many", lambda t, paths: next(whisper))
+    monkeypatch.setattr(m, "run_qwen", lambda d, paths, cfg: ["the cat sat on mat"])
+    m.main()
+    assert open(out).read().splitlines()[1] == "a.mp3,the cat sat on the mat"
